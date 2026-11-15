@@ -4,7 +4,7 @@ Firmware en desarrollo para dos trackers corporales **Waveshare ESP32-S3-LCD-1.4
 
 ## Estado del proyecto
 
-- Versión indicada por ambos códigos: **Universal Tracker v2.2.5**.
+- Versión indicada por ambos códigos: **Universal Tracker v2.2.6**.
 - Los dos sketch son iguales salvo por `#define TRACKER_ID`.
 - Los algoritmos actuales identifican actividad `MOV_ON` / `MOV_OFF` y un candidato `UP_IMPULSE`; **no confirman por sí solos pasos biomecánicos ni saltos**. La futura aplicación Unity deberá combinar información de ambos tobillos para decidir `STEP`, `WALK`, `RUN` y `JUMP`.
 - Este repositorio reúne los archivos fuente proporcionados; **no implica que hayan sido compilados o probados de nuevo**.
@@ -21,7 +21,7 @@ Firmware/
         └── BIOFIT_TOBILLO_DERECHO_BASE.ino
 ```
 
-Se conservó **íntegro el contenido de ambos archivos originales**; solo se normalizaron sus nombres para que cada sketch `.ino` esté dentro de una carpeta con el mismo nombre, como exige Arduino IDE.
+La revisión 2.2.6 modifica transporte y timestamps. Se conservan las funciones de calibración, NVS y clasificación; los sketch mantienen su carpeta homónima requerida por Arduino IDE.
 
 ## Dispositivos
 
@@ -87,3 +87,5 @@ Validación de fuentes: `python tests/check_contract.py`. El workflow
 `ESP32 firmware validation` además compila ambos roles con core 3.3.5.
 Su resultado debe verificarse: un control estático aprobado no es compilación,
 y una compilación aprobada no es ensayo físico. No se declara resuelta la latencia.
+
+Compilación confirmada de ambos roles: [Actions 43765893874](https://github.com/LucianoRodriguezUrquiza/BIOFIT-GAME-Firmware/actions/runs/43765893874), commit de código `9b3afb7ef69d96f0f4bdc8bb99ecaf883ac4c583`, core 3.3.5 y GFX 1.6.9. Esto no valida funcionamiento físico ni latencia movimiento-pantalla.
