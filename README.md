@@ -71,3 +71,19 @@ Validar señales y calibración en ambos tobillos, caracterizar los movimientos 
 ## Licencia
 
 No se agregó ninguna licencia. Elegir una licencia explícita antes de autorizar la reutilización por terceros.
+
+## Revisión de transporte 2.2.6
+
+La rama `fix/ble-latency-consolidated` separa TX BLE de LCD/USB/NVS,
+reduce STATUS a 10 Hz, corrige los timestamps a `millis()` y añade diagnóstico
+TRANSPORT opcional a 1 Hz. EVENT continúa V2/16 bytes: bit 7 de flags indica
+que bytes 14–15 contienen espera en cola firmware en ms. La aplicación anterior
+ignora esos bytes; la revisión Unity coordinada los usa para impedir acciones antiguas.
+No se modificaron funciones de calibración, mapa anatómico, NVS o clasificación.
+
+[Diagnóstico, protocolo y sesión única](https://github.com/LucianoRodriguezUrquiza/BIOFIT-GAME-UNITY/blob/fix/ble-latency-consolidated/docs/LATENCIA_REVISION_CONSOLIDADA.md).
+
+Validación de fuentes: `python tests/check_contract.py`. El workflow
+`ESP32 firmware validation` además compila ambos roles con core 3.3.5.
+Su resultado debe verificarse: un control estático aprobado no es compilación,
+y una compilación aprobada no es ensayo físico. No se declara resuelta la latencia.

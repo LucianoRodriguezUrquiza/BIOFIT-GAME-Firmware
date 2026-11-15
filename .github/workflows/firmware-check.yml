@@ -1,0 +1,27 @@
+name: ESP32 firmware validation
+on: [push, pull_request]
+jobs:
+  source-contract:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+      - run: python3 tests/check_contract.py
+  compile:
+    runs-on: ubuntu-latest
+    strategy:
+      matrix:
+        side: [Izquierdo, Derecho]
+    steps:
+      - uses: actions/checkout@v4
+      - uses: arduino/setup-arduino-cli@v2
+      - run: |
+          arduino-cli core update-index --additional-urls https://espressif.github.io/arduino-esp32/package_esp32_index.json
+          arduino-cli core install esp32:esp32@3.3.5 --additional-urls https://espressif.github.io/arduino-esp32/package_esp32_index.json
+          arduino-cli lib install "GFX Library for Arduino"
+      - name: Compile only (no upload, no NVS access)
+        shell: bash
+        run: |
+          sketch=$(find "Firmware/Tobillo_${{ matrix.side }}" -name '*.ino' -print -quit)
+          arduino-cli compile --fqbn esp32:esp32:esp32s3:USBMode=hwcdc,CDCOnBoot=cdc "$(dirname "$sketch")"
