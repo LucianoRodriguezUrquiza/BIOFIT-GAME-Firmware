@@ -1,5 +1,5 @@
 /*
-  BIOFIT GAME | UNIVERSAL TRACKER v2.2.5 + SERIAL PLOTTER EJE_X/EJE_Y/EJE_Z
+  BIOFIT GAME | UNIVERSAL TRACKER v2.2.6 + SERIAL PLOTTER EJE_X/EJE_Y/EJE_Z
   Hardware: Waveshare ESP32-S3-LCD-1.47B (NO Touch), IMU QMI8658A.
   Arduino-ESP32 core 3.3.x; instalar "GFX Library for Arduino".
 
@@ -78,7 +78,7 @@ static constexpr int LCD_MOSI = 45, LCD_RST = 39, LCD_BL = 46;
 static constexpr float ODR_HZ = 224.2f;
 static constexpr float DEG_TO_RAD_F = 0.01745329252f;
 static constexpr float G_MS2 = 9.80665f;
-static constexpr uint32_t STATUS_EVERY_MS = 50; // estado a 20 Hz
+static constexpr uint32_t STATUS_EVERY_MS = 100; // estado a 10 Hz, eventos tienen prioridad
 static constexpr uint32_t RAW_EVERY_MS = 50;    // seis ejes a 20 Hz si STREAM=1
 static constexpr uint32_t SCREEN_EVERY_MS = 100;
 static constexpr uint32_t AXES_EVERY_MS = 50; // opcional via AXSTREAM,1
@@ -256,6 +256,7 @@ struct ImuSample {
   float a[3]; // g, ejes internos QMI
   float w[3]; // dps, ejes internos QMI
   uint32_t us;
+  uint32_t ms; // millis real: no dividir micros (wrap a los 71 minutos)
 };
 
 // Prototipos explicitos para evitar preprocesador Arduino con structs.
@@ -275,6 +276,7 @@ bool readSample(ImuSample &s) {
   uint8_t b[12];
   if (!regBlock(QMI_AX_L, b, sizeof(b))) { ++i2cErrors; return false; }
   s.us = micros();
+  s.ms = millis();
   for (int i = 0; i < 3; ++i) {
     s.a[i] = readLE16(b + 2*i) / 4096.0f;
     s.w[i] = readLE16(b + 6 + 2*i) / 64.0f;
@@ -332,7 +334,7 @@ static void put32(uint8_t *p, uint32_t v) {
   for (int i=0; i<4; ++i) p[i] = (uint8_t)(v >> (i*8));
 }
 
-struct EventPacket { uint8_t b[16]; };
+struct EventPacket { uint8_t b[16]; uint32_t queuedMs; };
 struct CommandPacket { char text[64]; };
 QueueHandle_t eventQueue = nullptr, commandQueue = nullptr;
 volatile uint32_t droppedEvents = 0;
@@ -344,10 +346,32 @@ volatile bool streamAxes = false;
 BLECharacteristic *chrEvents = nullptr, *chrStatus = nullptr;
 BLECharacteristic *chrConfig = nullptr, *chrRaw = nullptr, *chrAxes = nullptr;
 BLEServer *bleServer = nullptr;
+BLECharacteristic *chrTransport = nullptr;
+BLE2902 *eventsCccd = nullptr;
+static const char UUID_TRANSPORT[] = "f9710000-6d68-4b7d-a742-6fae7b5f0007";
+uint16_t queueHighWater=0, maxQueueAgeMs=0, maxNotifyMs=0, maxTransportGapMs=0;
+volatile uint32_t notifyErrors=0;
+uint16_t transportSeq=0;
+static uint16_t capped16(uint32_t v) { return v > 65535 ? 65535 : (uint16_t)v; }
+class TransportCallbacks : public BLECharacteristicCallbacks {
+  void onStatus(BLECharacteristic*, Status status, uint32_t) override {
+    // SUCCESS_NOTIFY means accepted by stack, NOT received by Android.
+    if (status == Status::ERROR_GATT) ++notifyErrors;
+  }
+};
+void timedNotify(BLECharacteristic *characteristic) {
+  const uint32_t beginMs=millis();
+  characteristic->notify();
+  const uint16_t elapsed=capped16((uint32_t)(millis()-beginMs));
+  if (elapsed>maxNotifyMs) maxNotifyMs=elapsed;
+}
+void transportTask(void*);
+
 uint16_t eventSeq = 0, statusSeq = 0, rawSeq = 0, axisSeq = 0;
 
 void pushEvent(uint8_t type, uint32_t timestamp, float gyroDps, float upG, uint8_t flags) {
   EventPacket p = {};
+  p.queuedMs = millis();
   p.b[0] = 2; p.b[1] = TRACKER_ID; p.b[2] = type; p.b[3] = flags;
   put16(p.b+4, ++eventSeq);
   put32(p.b+6, timestamp);
@@ -377,7 +401,7 @@ void startBLE() {
   BLEDevice::init(TRACKER_NAME);
   bleServer = BLEDevice::createServer();
   bleServer->setCallbacks(new BiofitServerCallbacks());
-  BLEService *svc = bleServer->createService(UUID_SERVICE);
+  BLEService *svc = bleServer->createService(BLEUUID(UUID_SERVICE), 32); // seis caracteristicas + CCCD
   chrEvents = svc->createCharacteristic(UUID_EVENTS,
     BLECharacteristic::PROPERTY_NOTIFY | BLECharacteristic::PROPERTY_READ);
   chrStatus = svc->createCharacteristic(UUID_STATUS,
@@ -389,12 +413,19 @@ void startBLE() {
     BLECharacteristic::PROPERTY_NOTIFY | BLECharacteristic::PROPERTY_READ);
   chrAxes = svc->createCharacteristic(UUID_AXES,
     BLECharacteristic::PROPERTY_NOTIFY | BLECharacteristic::PROPERTY_READ);
-  chrEvents->addDescriptor(new BLE2902());
+  eventsCccd = new BLE2902();
+  chrEvents->addDescriptor(eventsCccd);
+  chrEvents->setCallbacks(new TransportCallbacks());
   chrStatus->addDescriptor(new BLE2902());
   chrConfig->addDescriptor(new BLE2902());
   chrRaw->addDescriptor(new BLE2902());
   chrAxes->addDescriptor(new BLE2902());
   chrConfig->setCallbacks(new ConfigWriteCallbacks());
+  chrTransport = svc->createCharacteristic(UUID_TRANSPORT,
+    BLECharacteristic::PROPERTY_NOTIFY | BLECharacteristic::PROPERTY_READ);
+  chrTransport->addDescriptor(new BLE2902());
+  chrStatus->setCallbacks(new TransportCallbacks());
+  chrTransport->setCallbacks(new TransportCallbacks());
   uint8_t emptyE[16] = {}; emptyE[0]=2; emptyE[1]=TRACKER_ID;
   uint8_t emptyS[20] = {}; emptyS[0]=2; emptyS[1]=TRACKER_ID;
   chrEvents->setValue(emptyE, sizeof(emptyE));
@@ -820,7 +851,7 @@ void calibrationSample(const ImuSample &s, uint32_t nowMs) {
 }
 
 void processSample(const ImuSample &s, float dt) {
-  const uint32_t ms = s.us / 1000UL;
+  const uint32_t ms = s.ms;
   if (requestCalibration) {
     requestCalibration = false;
     beginCalibration(ms);
@@ -991,7 +1022,7 @@ void imuTask(void*) {
     ulTaskNotifyTake(pdTRUE,pdMS_TO_TICKS(3));
     if (!readSample(s)) continue;
     ++imuSamples;
-    const uint32_t ms=s.us/1000UL;
+    const uint32_t ms=s.ms;
     float dt=1.0f/ODR_HZ;
     if (lastUs!=0) {
       dt=(uint32_t)(s.us-lastUs)*1e-6f;
@@ -1207,7 +1238,7 @@ void drawStaticScreen() {
   lcd->setTextColor(C_WHITE); lcd->setTextSize(2);
   lcd->setCursor(10,5); lcd->print("BIOFIT GAME");
   lcd->setTextSize(1); lcd->setCursor(10,27);
-  lcd->print(TRACKER_LABEL); lcd->print("  v2.2.5");
+  lcd->print(TRACKER_LABEL); lcd->print("  v2.2.6");
   lcd->drawFastHLine(0,130,320,C_BLUE);
 }
 void drawDynamicScreen() {
@@ -1266,12 +1297,15 @@ void drawDynamicScreen() {
 // =========================== MAIN ===================================
 void setup() {
   Serial.begin(115200);
+#if ARDUINO_USB_CDC_ON_BOOT
+  Serial.setTxTimeoutMs(0); // USB ausente/lento no debe frenar adquisicion
+#endif
   delay(350);
   // Leer NVS antes de imprimir: si se abre el Plotter y ocurre un reset,
   // ninguna linea de texto no numerico contamina las curvas.
   loadConfig();
   loadSavedAxisMap();
-  if (!serialPlotMode) Serial.printf("\nBIOFIT GAME v2.2.5 XYZ+PLOT | ID=%d | %s\n", TRACKER_ID, TRACKER_NAME);
+  if (!serialPlotMode) Serial.printf("\nBIOFIT GAME v2.2.6 XYZ+PLOT | ID=%d | %s\n", TRACKER_ID, TRACKER_NAME);
   if (!serialPlotMode) Serial.println("MOV es movimiento estimado. UP es candidato, NO altura/salto confirmado.");
 
   eventQueue=xQueueCreate(32,sizeof(EventPacket));
@@ -1299,6 +1333,10 @@ void setup() {
   if (!serialPlotMode) Serial.printf("QMI8658: 0x%02X, ODR nominal 224.2Hz, +/-8g, +/-512dps\n",imuAddr);
   startBLE();
   xTaskCreatePinnedToCore(imuTask,"BIOFIT_IMU",8192,nullptr,5,&imuTaskHandle,1);
+  if (xTaskCreatePinnedToCore(transportTask,"BIOFIT_BLE_TX",6144,nullptr,2,nullptr,1)!=pdPASS) {
+    if (!serialPlotMode) Serial.println("FATAL: tarea BLE TX");
+    while(true) delay(1000);
+  }
   pinMode(IMU_INT2,INPUT);
   attachInterrupt(digitalPinToInterrupt(IMU_INT2),imuIRQ,RISING);
   if (!serialPlotMode) Serial.println("Serial: CAL, AXIS,TILT, AXIS,APPLY, AXIS,SHOW, TEST,REST, TEST,UP, TEST,X, TEST,Y, TEST,ROT");
@@ -1333,7 +1371,7 @@ void loop() {
   // No escritura Serial desde la IMU al usar PLOT; graficar desde loop.
   // Antes de AXIS OK, no rotulamos datos crudos como anatomicos:
   // las tres lineas permanecen en cero hasta calibrar la transformacion.
-  if (serialPlotMode && (uint32_t)(now-lastPlot)>=plotEveryMs) {
+  if (serialPlotMode && Serial.availableForWrite()>=64 && (uint32_t)(now-lastPlot)>=plotEveryMs) {
     lastPlot=now;
     const LiveData p=liveSnapshot();
     if ((p.flags & 0x20) && (p.flags & 0x04)) {
@@ -1353,13 +1391,36 @@ void loop() {
   }
   prevConnected=connected;
 
-  // Eventos urgentes se procesan ANTES de dibujar la LCD.
+  if ((uint32_t)(now-lastScreen)>=SCREEN_EVERY_MS) {
+    lastScreen=now;
+    drawDynamicScreen();
+  }
+  delay(2);
+}
+
+void transportTask(void*) {
+  for (;;) {
+  // Unico propietario de EVENT/STATUS/RAW/AXES/TRANSPORT. Sin LCD, NVS ni Serial.
+  const uint32_t now=millis();
+  const bool connected=bleConnected;
+  static uint32_t lastPass=0, lastTransport=0;
+  if (lastPass) {
+    const uint16_t gap=capped16((uint32_t)(now-lastPass));
+    if (gap>maxTransportGapMs) maxTransportGapMs=gap;
+  }
+  lastPass=now;
+  const UBaseType_t depth=uxQueueMessagesWaiting(eventQueue);
+  if (depth>queueHighWater) queueHighWater=(uint16_t)depth;
   EventPacket evt;
   uint8_t drained=0;
   while (drained<8 && xQueueReceive(eventQueue,&evt,0)==pdTRUE) {
-    if (connected && chrEvents) {
+    if (connected && chrEvents && eventsCccd->getNotifications()) {
+      const uint16_t age=capped16((uint32_t)(millis()-evt.queuedMs));
+      if (age>maxQueueAgeMs) maxQueueAgeMs=age;
+      evt.b[3] |= 0x80; // V2 extension: bytes 14..15 = espera en cola firmware, ms
+      put16(evt.b+14,age);
       chrEvents->setValue(evt.b,sizeof(evt.b));
-      chrEvents->notify();
+      timedNotify(chrEvents);
     }
     ++drained;
   }
@@ -1373,7 +1434,7 @@ void loop() {
     put16(p+14,(uint16_t)d.activityMg); put16(p+16,d.imuHz);
     put16(p+18,(uint16_t)(i2cErrors & 0xFFFF));
     chrStatus->setValue(p,sizeof(p));
-    if (connected) chrStatus->notify();
+    if (connected) timedNotify(chrStatus);
   }
   if (streamRaw && (uint32_t)(now-lastRaw)>=RAW_EVERY_MS) {
     lastRaw=now;
@@ -1384,7 +1445,7 @@ void loop() {
     put16(p+14,(uint16_t)d.rawGxX10); put16(p+16,(uint16_t)d.rawGyX10);
     put16(p+18,(uint16_t)d.rawGzX10);
     chrRaw->setValue(p,sizeof(p));
-    if (connected) chrRaw->notify();
+    if (connected) timedNotify(chrRaw);
   }
   if (streamAxes && (uint32_t)(now-lastAxes)>=AXES_EVERY_MS) {
     lastAxes=now;
@@ -1395,11 +1456,17 @@ void loop() {
     put16(p+12,(uint16_t)d.bodyAzMg); put16(p+14,(uint16_t)d.bodyGxX10);
     put16(p+16,(uint16_t)d.bodyGyX10); put16(p+18,(uint16_t)d.bodyGzX10);
     chrAxes->setValue(p,sizeof(p));
-    if (connected && (d.flags&0x20)) chrAxes->notify();
+    if (connected && (d.flags&0x20)) timedNotify(chrAxes);
   }
-  if ((uint32_t)(now-lastScreen)>=SCREEN_EVERY_MS) {
-    lastScreen=now;
-    drawDynamicScreen();
+  if (connected && (uint32_t)(now-lastTransport)>=1000) {
+    lastTransport=now;
+    uint8_t p[20]={1,TRACKER_ID};
+    put16(p+2,++transportSeq); put32(p+4,millis());
+    put16(p+8,queueHighWater); put16(p+10,capped16(droppedEvents));
+    put16(p+12,maxQueueAgeMs); put16(p+14,maxNotifyMs);
+    put16(p+16,maxTransportGapMs); put16(p+18,capped16(notifyErrors));
+    chrTransport->setValue(p,sizeof(p)); timedNotify(chrTransport);
   }
-  delay(2);
+    vTaskDelay(pdMS_TO_TICKS(2));
+  }
 }
