@@ -309,6 +309,7 @@ struct LiveData {
   uint16_t rearms, blockedSamples, restRejected;
   uint8_t upBlockReason, autoEnabled;
 };
+void snapshotDetectorDiagnostics(LiveData &d, uint32_t ms);
 LiveData liveSnapshot();
 void setLive(const LiveData &next);
 // flags: bit0 MOV, bit1 UP reciente, bit2 calibrado, bit3 IMU OK, bit4 CAL activo
