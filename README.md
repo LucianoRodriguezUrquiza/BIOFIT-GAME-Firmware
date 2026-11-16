@@ -4,7 +4,8 @@ Firmware en desarrollo para dos trackers corporales **Waveshare ESP32-S3-LCD-1.4
 
 ## Estado del proyecto
 
-- Versión indicada por ambos códigos: **Universal Tracker v2.2.6**.
+- Versión indicada por ambos códigos: **Universal Tracker v2.2.7**.
+- Revisión de estabilidad, pruebas y sesión consolidada: [REVISION_V08](docs/REVISION_V08.md).
 - Los dos sketch son iguales salvo por `#define TRACKER_ID`.
 - Los algoritmos actuales identifican actividad `MOV_ON` / `MOV_OFF` y un candidato `UP_IMPULSE`; **no confirman por sí solos pasos biomecánicos ni saltos**. La futura aplicación Unity deberá combinar información de ambos tobillos para decidir `STEP`, `WALK`, `RUN` y `JUMP`.
 - Este repositorio reúne los archivos fuente proporcionados; **no implica que hayan sido compilados o probados de nuevo**.
@@ -21,7 +22,7 @@ Firmware/
         └── BIOFIT_TOBILLO_DERECHO_BASE.ino
 ```
 
-La revisión 2.2.6 modifica transporte y timestamps. Se conservan las funciones de calibración, NVS y clasificación; los sketch mantienen su carpeta homónima requerida por Arduino IDE.
+La revisión 2.2.7 conserva el transporte de 2.2.6 y corrige estabilidad de calibración/auto-reposo y rearme. Conserva NVS y mapa anatómico; los sketch mantienen su carpeta homónima requerida por Arduino IDE.
 
 ## Dispositivos
 
