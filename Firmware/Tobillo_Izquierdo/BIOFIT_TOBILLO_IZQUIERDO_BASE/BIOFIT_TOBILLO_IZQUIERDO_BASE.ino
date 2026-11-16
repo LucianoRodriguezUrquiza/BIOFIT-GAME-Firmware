@@ -309,7 +309,6 @@ struct LiveData {
   uint16_t rearms, blockedSamples, restRejected;
   uint8_t upBlockReason, autoEnabled;
 };
-void snapshotDetectorDiagnostics(LiveData &d, uint32_t ms);
 LiveData liveSnapshot();
 void setLive(const LiveData &next);
 // flags: bit0 MOV, bit1 UP reciente, bit2 calibrado, bit3 IMU OK, bit4 CAL activo
@@ -884,17 +883,6 @@ void calibrationSample(const ImuSample &s, uint32_t nowMs) {
   }
 }
 
-void snapshotDetectorDiagnostics(LiveData &d,uint32_t ms) {
-  d.restCount=(uint16_t)min((uint32_t)autoRestCount,(uint32_t)65535);
-  d.disarmedMs=det.upArmed ? 0 : (uint16_t)min((uint32_t)(ms-det.lastUpMs),(uint32_t)65535);
-  d.biasNormX100=(uint16_t)min((uint32_t)lroundf(length3(gyroBias)*100),(uint32_t)65535);
-  d.gravityMg=(uint16_t)lroundf(gravityNorm*1000);
-  d.velocityMmS=toI16(shortV*1000); d.calSamples=calCount;
-  d.rearms=(uint16_t)min(rearmCount,(uint32_t)65535);
-  d.blockedSamples=(uint16_t)min(blockedUpSamples,(uint32_t)65535);
-  d.restRejected=(uint16_t)min(restRejectedWindows,(uint32_t)65535);
-  d.upBlockReason=upBlockReason; d.autoEnabled=autoRestEnabled?1:0;
-}
 void processSample(const ImuSample &s, float dt) {
   const uint32_t ms = s.ms;
   portENTER_CRITICAL(&dataMux);
@@ -914,7 +902,15 @@ void processSample(const ImuSample &s, float dt) {
     d.ms = ms; d.flags = 0x80 | 0x08 | (calibrating ? 0x10 : 0x04) |
       (!calibrating && det.upArmed ? 0x40:0) | (axisReady?0x20:0);
     d.imuHz = imuRateHz;
-    snapshotDetectorDiagnostics(d,ms);
+    d.restCount=(uint16_t)min((uint32_t)autoRestCount,(uint32_t)65535);
+    d.disarmedMs=det.upArmed ? 0 : (uint16_t)min((uint32_t)(ms-det.lastUpMs),(uint32_t)65535);
+    d.biasNormX100=(uint16_t)min((uint32_t)lroundf(length3(gyroBias)*100),(uint32_t)65535);
+    d.gravityMg=(uint16_t)lroundf(gravityNorm*1000);
+    d.velocityMmS=toI16(shortV*1000); d.calSamples=calCount;
+    d.rearms=(uint16_t)min(rearmCount,(uint32_t)65535);
+    d.blockedSamples=(uint16_t)min(blockedUpSamples,(uint32_t)65535);
+    d.restRejected=(uint16_t)min(restRejectedWindows,(uint32_t)65535);
+    d.upBlockReason=upBlockReason; d.autoEnabled=autoRestEnabled?1:0;
     setLive(d);
     return;
   }
@@ -1057,7 +1053,15 @@ void processSample(const ImuSample &s, float dt) {
   d.flags=(det.moving ? 0x01 : 0) |
     ((uint32_t)(ms-det.lastUpEventMs)<130 && det.ups>0 ? 0x02:0) |
     0x04 | 0x08 | 0x80 | (det.upArmed ? 0x40 : 0) | (axisReady ? 0x20 : 0);
-  snapshotDetectorDiagnostics(d,ms);
+  d.restCount=(uint16_t)min((uint32_t)autoRestCount,(uint32_t)65535);
+  d.disarmedMs=det.upArmed ? 0 : (uint16_t)min((uint32_t)(ms-det.lastUpMs),(uint32_t)65535);
+  d.biasNormX100=(uint16_t)min((uint32_t)lroundf(length3(gyroBias)*100),(uint32_t)65535);
+  d.gravityMg=(uint16_t)lroundf(gravityNorm*1000);
+  d.velocityMmS=toI16(shortV*1000); d.calSamples=calCount;
+  d.rearms=(uint16_t)min(rearmCount,(uint32_t)65535);
+  d.blockedSamples=(uint16_t)min(blockedUpSamples,(uint32_t)65535);
+  d.restRejected=(uint16_t)min(restRejectedWindows,(uint32_t)65535);
+  d.upBlockReason=upBlockReason; d.autoEnabled=autoRestEnabled?1:0;
   setLive(d);
 }
 

@@ -22,7 +22,7 @@ for p in paths:
                 if level==0:return src[begin:i+1]
     for name in ['loadConfig','saveConfig','loadSavedAxisMap','saveAxisMapInMainLoop','tryRestoreSavedAxisMap','applyAutoRest']:
         assert function(old,name).replace('s.us / 1000UL','s.ms')==function(now,name),name
-    assert 'void snapshotDetectorDiagnostics(LiveData &d, uint32_t ms);' in now
+    assert now.count('d.restCount=(uint16_t)min(')==2
     assert 's.us/1000UL' not in now and 's.us / 1000UL' not in now
     tx=now[now.index('void transportTask(void*) {'):]
     tx=re.sub(r'//[^\n]*','',tx)
