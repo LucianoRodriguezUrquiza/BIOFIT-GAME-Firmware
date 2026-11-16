@@ -1,5 +1,5 @@
 /*
-  BIOFIT GAME | UNIVERSAL TRACKER v2.2.6 + SERIAL PLOTTER EJE_X/EJE_Y/EJE_Z
+  BIOFIT GAME | UNIVERSAL TRACKER v2.2.7 + SERIAL PLOTTER EJE_X/EJE_Y/EJE_Z
   Hardware: Waveshare ESP32-S3-LCD-1.47B (NO Touch), IMU QMI8658A.
   Arduino-ESP32 core 3.3.x; instalar "GFX Library for Arduino".
 
@@ -304,6 +304,10 @@ struct LiveData {
   uint16_t imuHz;
   uint32_t motionCount, upCount;
   uint8_t intensity, flags;
+  uint16_t restCount, disarmedMs, biasNormX100, gravityMg, calSamples;
+  int16_t velocityMmS;
+  uint16_t rearms, blockedSamples, restRejected;
+  uint8_t upBlockReason, autoEnabled;
 };
 LiveData liveSnapshot();
 void setLive(const LiveData &next);
@@ -708,6 +712,12 @@ static constexpr float AUTO_REST_STD_G = 0.025f; // desviacion tipica por eje
 static constexpr float AUTO_REST_STD_W = 2.5f;   // dps por eje
 volatile bool calibrated = false;
 volatile bool autoRestEnabled = true;
+// Main/CONFIG only requests; the IMU task owns all rest accumulators.
+volatile int8_t pendingAutoRestMode = -1;
+uint32_t rearmCount=0, blockedUpSamples=0, restRejectedWindows=0;
+uint8_t upBlockReason=0;
+static constexpr float STABLE_ACCEL_SPAN_G = 0.040f; // guards slow tilts hidden by variance
+float restMinA[3]={},restMaxA[3]={};
 volatile uint32_t autoRestCount = 0;
 volatile uint32_t autoRestLastMs = 0;
 uint32_t autoRestStartMs = 0;
@@ -773,8 +783,10 @@ void observeAutoRest(const ImuSample &s, uint32_t ms) {
   // La correccion se repite tras cada nueva ventana de reposo estable.
   // Asi no se acumula deriva mientras la placa permanece inmovil.
   if (autoRestN==0) autoRestStartMs=ms;
+  if (autoRestN==0) for(int i=0;i<3;++i) restMinA[i]=restMaxA[i]=s.a[i];
   ++autoRestN;
   for (int i=0;i<3;++i) {
+    restMinA[i]=fminf(restMinA[i],s.a[i]); restMaxA[i]=fmaxf(restMaxA[i],s.a[i]);
     autoRestSumA[i]+=s.a[i];
     autoRestSumSqA[i]+=s.a[i]*s.a[i];
     autoRestSumW[i]+=s.w[i];
@@ -788,7 +800,8 @@ void observeAutoRest(const ImuSample &s, uint32_t ms) {
     meanW[i]=autoRestSumW[i]/autoRestN;
     float va=fmaxf(0.0f,autoRestSumSqA[i]/autoRestN-meanA[i]*meanA[i]);
     float vw=fmaxf(0.0f,autoRestSumSqW[i]/autoRestN-meanW[i]*meanW[i]);
-    if (va>AUTO_REST_STD_G*AUTO_REST_STD_G ||
+    if (restMaxA[i]-restMinA[i]>STABLE_ACCEL_SPAN_G ||
+        va>AUTO_REST_STD_G*AUTO_REST_STD_G ||
         vw>AUTO_REST_STD_W*AUTO_REST_STD_W) steady=false;
   }
   // Evitar confundir un giro lento y constante con reposo absoluto.
@@ -798,13 +811,14 @@ void observeAutoRest(const ImuSample &s, uint32_t ms) {
   resetAutoRestWindow();
   if (steady) {
     applyAutoRest(meanA,meanW,ms);
-  }
+  } else ++restRejectedWindows;
 }
 
 volatile bool calibrating = true;
 uint32_t calStartMs = 0;
 uint16_t calCount = 0;
 float calA[3] = {0,0,0}, calW[3] = {0,0,0};
+float calMinA[3]={},calMaxA[3]={},calSqA[3]={},calSqW[3]={};
 
 void beginCalibration(uint32_t nowMs) {
   calibrating = true;
@@ -823,13 +837,32 @@ void beginCalibration(uint32_t nowMs) {
 void calibrationSample(const ImuSample &s, uint32_t nowMs) {
   const float aNorm = length3(s.a), wNorm = length3(s.w);
   if (fabsf(aNorm - 1.0f) <= 0.14f && wNorm < 12.0f) {
-    for (int i=0; i<3; ++i) { calA[i]+=s.a[i]; calW[i]+=s.w[i]; }
+    if (calCount==0) for(int i=0;i<3;++i) {
+      calMinA[i]=calMaxA[i]=s.a[i]; calSqA[i]=calSqW[i]=0;
+    }
+    for (int i=0; i<3; ++i) {
+      calA[i]+=s.a[i]; calW[i]+=s.w[i];
+      calSqA[i]+=s.a[i]*s.a[i]; calSqW[i]+=s.w[i]*s.w[i];
+      calMinA[i]=fminf(calMinA[i],s.a[i]); calMaxA[i]=fmaxf(calMaxA[i],s.a[i]);
+    }
     ++calCount;
   } else {
     calCount=0;
     for (int i=0; i<3; ++i) { calA[i]=0; calW[i]=0; }
   }
   if (calCount >= 170) {
+    // Norm and gyro magnitude alone also accept a rotating sensor.
+    bool stable=true;
+    for(int i=0;i<3;++i) {
+      float ma=calA[i]/calCount,mw=calW[i]/calCount;
+      if(calMaxA[i]-calMinA[i]>STABLE_ACCEL_SPAN_G ||
+         calSqA[i]/calCount-ma*ma>AUTO_REST_STD_G*AUTO_REST_STD_G ||
+         calSqW[i]/calCount-mw*mw>AUTO_REST_STD_W*AUTO_REST_STD_W) stable=false;
+    }
+    if(!stable) {
+      calCount=0; for(int i=0;i<3;++i) calA[i]=calW[i]=0;
+      return;
+    }
     for (int i=0; i<3; ++i) {
       gyroBias[i] = calW[i] / calCount;
       verticalUnit[i] = calA[i] / calCount;
@@ -850,8 +883,26 @@ void calibrationSample(const ImuSample &s, uint32_t nowMs) {
   }
 }
 
+void snapshotDetectorDiagnostics(LiveData &d,uint32_t ms) {
+  d.restCount=(uint16_t)min((uint32_t)autoRestCount,(uint32_t)65535);
+  d.disarmedMs=det.upArmed ? 0 : (uint16_t)min((uint32_t)(ms-det.lastUpMs),(uint32_t)65535);
+  d.biasNormX100=(uint16_t)min((uint32_t)lroundf(length3(gyroBias)*100),(uint32_t)65535);
+  d.gravityMg=(uint16_t)lroundf(gravityNorm*1000);
+  d.velocityMmS=toI16(shortV*1000); d.calSamples=calCount;
+  d.rearms=(uint16_t)min(rearmCount,(uint32_t)65535);
+  d.blockedSamples=(uint16_t)min(blockedUpSamples,(uint32_t)65535);
+  d.restRejected=(uint16_t)min(restRejectedWindows,(uint32_t)65535);
+  d.upBlockReason=upBlockReason; d.autoEnabled=autoRestEnabled?1:0;
+}
 void processSample(const ImuSample &s, float dt) {
   const uint32_t ms = s.ms;
+  portENTER_CRITICAL(&dataMux);
+  int8_t autoMode=pendingAutoRestMode; pendingAutoRestMode=-1;
+  portEXIT_CRITICAL(&dataMux);
+  if (autoMode>=0) {
+    autoRestEnabled=autoMode==1;
+    resetAutoRestWindow();
+  }
   if (requestCalibration) {
     requestCalibration = false;
     beginCalibration(ms);
@@ -859,8 +910,10 @@ void processSample(const ImuSample &s, float dt) {
   if (calibrating) {
     calibrationSample(s, ms);
     LiveData d = liveSnapshot();
-    d.ms = ms; d.flags = 0x08 | (calibrating ? 0x10 : 0x04);
+    d.ms = ms; d.flags = 0x80 | 0x08 | (calibrating ? 0x10 : 0x04) |
+      (!calibrating && det.upArmed ? 0x40:0) | (axisReady?0x20:0);
     d.imuHz = imuRateHz;
+    snapshotDetectorDiagnostics(d,ms);
     setLive(d);
     return;
   }
@@ -963,12 +1016,16 @@ void processSample(const ImuSample &s, float dt) {
   if (!det.upArmed) {
     if (fUp < -c.upOnG*0.55f) det.downSeen=true;
     if ((uint32_t)(ms-det.lastUpMs) >= c.upGapMs &&
-        (det.downSeen || quiet) && fUp < c.upOnG*0.35f) {
-      det.upArmed = true; det.downSeen = false; det.upEvidence = 0;
+        (quiet || (det.downSeen && fUp < c.upOnG*0.35f))) {
+      det.upArmed = true; det.downSeen = false; det.upEvidence = 0; ++rearmCount;
     }
   }
   const bool upCandidate = fUp >= c.upOnG &&
     fActivity >= c.upActG && shortV >= c.upVms;
+  // Bitmask of current blockers; blockedSamples counts samples, NOT gestures.
+  upBlockReason=(fUp<c.upOnG?1:0)|(fActivity<c.upActG?2:0)|(shortV<c.upVms?4:0)|
+    (!det.upArmed?8:0)|(!det.upArmed && (uint32_t)(ms-det.lastUpMs)<c.upGapMs?16:0);
+  if(upCandidate && !det.upArmed) ++blockedUpSamples;
   if (det.upArmed) {
     det.upEvidence = upCandidate ? (uint8_t)min(3,(int)det.upEvidence+1) : 0;
     if (det.upEvidence >= 2) {
@@ -979,7 +1036,7 @@ void processSample(const ImuSample &s, float dt) {
   }
 
   const float scaledMotion = fmaxf(gyro/c.movOnDps, fActivity/c.movOnG);
-  LiveData d;
+  LiveData d = {};
   d.ms = ms;
   d.rawAxMg=toI16(s.a[0]*1000.0f); d.rawAyMg=toI16(s.a[1]*1000.0f);
   d.rawAzMg=toI16(s.a[2]*1000.0f);
@@ -998,7 +1055,8 @@ void processSample(const ImuSample &s, float dt) {
   d.intensity=(uint8_t)constrain((int)(scaledMotion*50),0,100);
   d.flags=(det.moving ? 0x01 : 0) |
     ((uint32_t)(ms-det.lastUpEventMs)<130 && det.ups>0 ? 0x02:0) |
-    0x04 | 0x08 | (axisReady ? 0x20 : 0);
+    0x04 | 0x08 | 0x80 | (det.upArmed ? 0x40 : 0) | (axisReady ? 0x20 : 0);
+  snapshotDetectorDiagnostics(d,ms);
   setLive(d);
 }
 
@@ -1126,9 +1184,10 @@ void runCommand(String command) {
     return;
   }
   if (command=="AUTO,1" || command=="AUTO,0") {
-    autoRestEnabled=command.endsWith("1");
-    resetAutoRestWindow();
-    replyConfig(autoRestEnabled?"OK,AUTO,1":"OK,AUTO,0"); return;
+    portENTER_CRITICAL(&dataMux);
+    pendingAutoRestMode=command.endsWith("1")?1:0;
+    portEXIT_CRITICAL(&dataMux);
+    replyConfig(command.endsWith("1")?"OK,AUTO,1":"OK,AUTO,0"); return;
   }
   if (command=="AUTO,STAT") {
     if (!serialPlotMode) Serial.printf("AUTO REST: %s, reposo=%lums, correcciones=%lu, ultima=%lums\n",
@@ -1238,7 +1297,7 @@ void drawStaticScreen() {
   lcd->setTextColor(C_WHITE); lcd->setTextSize(2);
   lcd->setCursor(10,5); lcd->print("BIOFIT GAME");
   lcd->setTextSize(1); lcd->setCursor(10,27);
-  lcd->print(TRACKER_LABEL); lcd->print("  v2.2.6");
+  lcd->print(TRACKER_LABEL); lcd->print("  v2.2.7");
   lcd->drawFastHLine(0,130,320,C_BLUE);
 }
 void drawDynamicScreen() {
@@ -1305,7 +1364,7 @@ void setup() {
   // ninguna linea de texto no numerico contamina las curvas.
   loadConfig();
   loadSavedAxisMap();
-  if (!serialPlotMode) Serial.printf("\nBIOFIT GAME v2.2.6 XYZ+PLOT | ID=%d | %s\n", TRACKER_ID, TRACKER_NAME);
+  if (!serialPlotMode) Serial.printf("\nBIOFIT GAME v2.2.7 XYZ+PLOT | ID=%d | %s\n", TRACKER_ID, TRACKER_NAME);
   if (!serialPlotMode) Serial.println("MOV es movimiento estimado. UP es candidato, NO altura/salto confirmado.");
 
   eventQueue=xQueueCreate(32,sizeof(EventPacket));
@@ -1466,6 +1525,30 @@ void transportTask(void*) {
     put16(p+12,maxQueueAgeMs); put16(p+14,maxNotifyMs);
     put16(p+16,maxTransportGapMs); put16(p+18,capped16(notifyErrors));
     chrTransport->setValue(p,sizeof(p)); timedNotify(chrTransport);
+    // V2 diagnostic extension, <=20 bytes. Existing V1 transport stays intact.
+    // State at 1Hz; one configuration/counter page per second (cycle 3s).
+    uint8_t q[20]={2,TRACKER_ID,0,d.flags}; put32(q+4,d.ms);
+    put16(q+8,d.restCount); put16(q+10,d.disarmedMs);
+    put16(q+12,(uint16_t)d.upMg); put16(q+14,(uint16_t)d.velocityMmS);
+    put16(q+16,d.biasNormX100); put16(q+18,d.gravityMg);
+    chrTransport->setValue(q,sizeof(q)); timedNotify(chrTransport);
+    static uint8_t page=1;
+    const RuntimeConfig c=configSnapshot();
+    q[2]=page; q[3]=d.autoEnabled;
+    if(page==1) {
+      put16(q+8,toI16(c.upOnG*1000)); put16(q+10,toI16(c.upActG*1000));
+      put16(q+12,toI16(c.upVms*1000)); put16(q+14,c.upGapMs);
+      put16(q+16,toI16(c.movOffG*1000)); put16(q+18,toI16(c.filterHz*100));
+    } else if(page==2) {
+      put16(q+8,toI16(c.movOnDps*10)); put16(q+10,toI16(c.movOffDps*10));
+      put16(q+12,toI16(c.movOnG*1000)); put16(q+14,c.confirmMs);
+      put16(q+16,c.releaseMs); put16(q+18,AUTO_REST_MS);
+    } else {
+      put16(q+8,d.rearms); put16(q+10,d.upBlockReason); put16(q+12,d.blockedSamples);
+      put16(q+14,d.calSamples); put16(q+16,d.restRejected); put16(q+18,227);
+    }
+    chrTransport->setValue(q,sizeof(q)); timedNotify(chrTransport);
+    page=page==3?1:page+1;
   }
     vTaskDelay(pdMS_TO_TICKS(2));
   }

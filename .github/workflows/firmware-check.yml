@@ -8,6 +8,8 @@ jobs:
         with:
           fetch-depth: 0
       - run: python3 tests/check_contract.py
+      - run: python3 tests/host/run_replay.py --baseline
+      - run: python3 tests/host/run_replay.py
   compile:
     runs-on: ubuntu-latest
     strategy:
@@ -19,7 +21,7 @@ jobs:
       - run: |
           arduino-cli core update-index --additional-urls https://espressif.github.io/arduino-esp32/package_esp32_index.json
           arduino-cli core install esp32:esp32@3.3.5 --additional-urls https://espressif.github.io/arduino-esp32/package_esp32_index.json
-          arduino-cli lib install "GFX Library for Arduino"
+          arduino-cli lib install "GFX Library for Arduino@1.6.9"
       - name: Compile only (no upload, no NVS access)
         shell: bash
         run: |
