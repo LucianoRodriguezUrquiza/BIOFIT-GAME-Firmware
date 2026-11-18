@@ -1,5 +1,5 @@
 /*
-  BIOFIT GAME | UNIVERSAL TRACKER v2.2.7 + SERIAL PLOTTER EJE_X/EJE_Y/EJE_Z
+  BIOFIT GAME | UNIVERSAL TRACKER v2.2.8 EXPERIMENTAL + SERIAL PLOTTER EJE_X/EJE_Y/EJE_Z
   Hardware: Waveshare ESP32-S3-LCD-1.47B (NO Touch), IMU QMI8658A.
   Arduino-ESP32 core 3.3.x; instalar "GFX Library for Arduino".
 
@@ -40,6 +40,7 @@
 #include <BLEUtils.h>
 #include <BLE2902.h>
 #include <Preferences.h>
+#include "BiofitPhaseEvidence.h"
 
 // Modo plotter persistente. Evita mezclar texto de depuracion y graficas.
 // Se carga desde NVS en loadConfig(); puede cambiarse con PLOT,1 / PLOT,0.
@@ -458,6 +459,7 @@ struct MotionDetector {
   uint32_t moves = 0, ups = 0;
 };
 MotionDetector det;
+BiofitPhaseEvidence phaseEvidence; // quality hint on UP, no new event type
 float gyroBias[3] = {0,0,0};
 float verticalUnit[3] = {0,0,1};
 float gravityNorm = 1.0f;
@@ -762,6 +764,7 @@ void applyAutoRest(const float meanA[3], const float meanW[3], uint32_t nowMs) {
   det.moving=false;
   det.onCandidateSince=0; det.releaseSince=0;
   det.upArmed=true; det.downSeen=false; det.upEvidence=0;
+  phaseEvidence.Reset(); // only after 2-second verified raw stationary window
   ++autoRestCount;
   autoRestLastMs=nowMs;
   if (!serialPlotMode) Serial.printf("AUTO_REST OK: %lu, gyroBias=%.2f/%.2f/%.2f, grav=%.4fg, XYZ conservados=%u\n",
@@ -827,6 +830,7 @@ void beginCalibration(uint32_t nowMs) {
   calCount = 0;
   for (int i=0; i<3; ++i) { calA[i]=0; calW[i]=0; }
   det = MotionDetector();
+  phaseEvidence.Reset();
   resetAutoRestWindow();
   axisReady=false; axisTiltReady=false; axisCaptureMode=0; axisRequest=0;
   finishTest();
@@ -1009,6 +1013,9 @@ void processSample(const ImuSample &s, float dt) {
     } else det.releaseSince=0;
   }
 
+  // Phase evidence observes EVERY IMU sample at ~224Hz; the legacy UP detector
+  // remains unchanged. A positive acceleration alone is not upward velocity.
+  phaseEvidence.Observe(ms,fUp,gyro,fActivity,aNorm,gravityNorm);
   // UP = candidato a impulso ascendente (no altura ni salto confirmado).
   if (!det.upArmed) {
     if (fUp < -c.upOnG*0.55f) det.downSeen=true;
@@ -1028,7 +1035,8 @@ void processSample(const ImuSample &s, float dt) {
     if (det.upEvidence >= 2) {
       det.upArmed=false; det.upEvidence=0; det.downSeen=false;
       det.lastUpMs=ms; det.lastUpEventMs=ms; ++det.ups;
-      pushEvent(3,ms,gyro,fUp,0x03);
+      const bool phaseReady = phaseEvidence.OnUp(ms);
+      pushEvent(3,ms,gyro,fUp,(uint8_t)(0x03 | (phaseReady ? 0x10 : 0x00)));
     }
   }
 
@@ -1302,7 +1310,7 @@ void drawStaticScreen() {
   lcd->setTextColor(C_WHITE); lcd->setTextSize(2);
   lcd->setCursor(10,5); lcd->print("BIOFIT GAME");
   lcd->setTextSize(1); lcd->setCursor(10,27);
-  lcd->print(TRACKER_LABEL); lcd->print("  v2.2.7");
+  lcd->print(TRACKER_LABEL); lcd->print("  v2.2.8 EXP");
   lcd->drawFastHLine(0,130,320,C_BLUE);
 }
 void drawDynamicScreen() {
@@ -1550,7 +1558,7 @@ void transportTask(void*) {
       put16(q+16,c.releaseMs); put16(q+18,AUTO_REST_MS);
     } else {
       put16(q+8,d.rearms); put16(q+10,d.upBlockReason); put16(q+12,d.blockedSamples);
-      put16(q+14,d.calSamples); put16(q+16,d.restRejected); put16(q+18,227);
+      put16(q+14,d.calSamples); put16(q+16,d.restRejected); put16(q+18,228);
     }
     chrTransport->setValue(q,sizeof(q)); timedNotify(chrTransport);
     page=page==3?1:page+1;
