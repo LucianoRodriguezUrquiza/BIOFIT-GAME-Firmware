@@ -10,6 +10,7 @@ jobs:
       - run: python3 tests/check_contract.py
       - run: python3 tests/host/run_replay.py --baseline
       - run: python3 tests/host/run_replay.py
+      - run: g++ -std=c++17 -Wall -Wextra -Werror tests/host/phase_evidence.cpp -o /tmp/biofit_phase && /tmp/biofit_phase
   compile:
     runs-on: ubuntu-latest
     strategy:
