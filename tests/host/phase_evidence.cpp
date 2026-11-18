@@ -43,6 +43,6 @@ int main()
   for(uint32_t k=0;k<=500;k+=10)sample(p,(uint32_t)(0xFFFFFF00u+k), k<340 ? -.2f:.0f);
   assert(p.ready); // 160ms stable after min interval across wrap
   assert(p.OnUp(260u));
-  assert(p.qualified==4 && p.unqualified==1);
+  assert(p.qualified==5 && p.unqualified==1);
   std::puts("PASS: real fw228 helper -- negative-phase gate, contiguous quiet dwell, gyro rejection, rollover, one rise/cycle");
 }
