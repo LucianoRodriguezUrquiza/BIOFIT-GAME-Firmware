@@ -1,5 +1,5 @@
 /*
-  BIOFIT GAME | UNIVERSAL TRACKER v2.2.5 + SERIAL PLOTTER EJE_X/EJE_Y/EJE_Z
+  BIOFIT GAME | UNIVERSAL TRACKER v2.2.8 EXPERIMENTAL + SERIAL PLOTTER EJE_X/EJE_Y/EJE_Z
   Hardware: Waveshare ESP32-S3-LCD-1.47B (NO Touch), IMU QMI8658A.
   Arduino-ESP32 core 3.3.x; instalar "GFX Library for Arduino".
 
@@ -40,6 +40,7 @@
 #include <BLEUtils.h>
 #include <BLE2902.h>
 #include <Preferences.h>
+#include "BiofitPhaseEvidence.h"
 
 // Modo plotter persistente. Evita mezclar texto de depuracion y graficas.
 // Se carga desde NVS en loadConfig(); puede cambiarse con PLOT,1 / PLOT,0.
@@ -78,7 +79,7 @@ static constexpr int LCD_MOSI = 45, LCD_RST = 39, LCD_BL = 46;
 static constexpr float ODR_HZ = 224.2f;
 static constexpr float DEG_TO_RAD_F = 0.01745329252f;
 static constexpr float G_MS2 = 9.80665f;
-static constexpr uint32_t STATUS_EVERY_MS = 50; // estado a 20 Hz
+static constexpr uint32_t STATUS_EVERY_MS = 100; // estado a 10 Hz, eventos tienen prioridad
 static constexpr uint32_t RAW_EVERY_MS = 50;    // seis ejes a 20 Hz si STREAM=1
 static constexpr uint32_t SCREEN_EVERY_MS = 100;
 static constexpr uint32_t AXES_EVERY_MS = 50; // opcional via AXSTREAM,1
@@ -256,6 +257,7 @@ struct ImuSample {
   float a[3]; // g, ejes internos QMI
   float w[3]; // dps, ejes internos QMI
   uint32_t us;
+  uint32_t ms; // millis real: no dividir micros (wrap a los 71 minutos)
 };
 
 // Prototipos explicitos para evitar preprocesador Arduino con structs.
@@ -275,6 +277,7 @@ bool readSample(ImuSample &s) {
   uint8_t b[12];
   if (!regBlock(QMI_AX_L, b, sizeof(b))) { ++i2cErrors; return false; }
   s.us = micros();
+  s.ms = millis();
   for (int i = 0; i < 3; ++i) {
     s.a[i] = readLE16(b + 2*i) / 4096.0f;
     s.w[i] = readLE16(b + 6 + 2*i) / 64.0f;
@@ -302,6 +305,10 @@ struct LiveData {
   uint16_t imuHz;
   uint32_t motionCount, upCount;
   uint8_t intensity, flags;
+  uint16_t restCount, disarmedMs, biasNormX100, gravityMg, calSamples;
+  int16_t velocityMmS;
+  uint16_t rearms, blockedSamples, restRejected;
+  uint8_t upBlockReason, autoEnabled;
 };
 LiveData liveSnapshot();
 void setLive(const LiveData &next);
@@ -332,7 +339,7 @@ static void put32(uint8_t *p, uint32_t v) {
   for (int i=0; i<4; ++i) p[i] = (uint8_t)(v >> (i*8));
 }
 
-struct EventPacket { uint8_t b[16]; };
+struct EventPacket { uint8_t b[16]; uint32_t queuedMs; };
 struct CommandPacket { char text[64]; };
 QueueHandle_t eventQueue = nullptr, commandQueue = nullptr;
 volatile uint32_t droppedEvents = 0;
@@ -344,10 +351,32 @@ volatile bool streamAxes = false;
 BLECharacteristic *chrEvents = nullptr, *chrStatus = nullptr;
 BLECharacteristic *chrConfig = nullptr, *chrRaw = nullptr, *chrAxes = nullptr;
 BLEServer *bleServer = nullptr;
+BLECharacteristic *chrTransport = nullptr;
+BLE2902 *eventsCccd = nullptr;
+static const char UUID_TRANSPORT[] = "f9710000-6d68-4b7d-a742-6fae7b5f0007";
+uint16_t queueHighWater=0, maxQueueAgeMs=0, maxNotifyMs=0, maxTransportGapMs=0;
+volatile uint32_t notifyErrors=0;
+uint16_t transportSeq=0;
+static uint16_t capped16(uint32_t v) { return v > 65535 ? 65535 : (uint16_t)v; }
+class TransportCallbacks : public BLECharacteristicCallbacks {
+  void onStatus(BLECharacteristic*, Status status, uint32_t) override {
+    // SUCCESS_NOTIFY means accepted by stack, NOT received by Android.
+    if (status == Status::ERROR_GATT) ++notifyErrors;
+  }
+};
+void timedNotify(BLECharacteristic *characteristic) {
+  const uint32_t beginMs=millis();
+  characteristic->notify();
+  const uint16_t elapsed=capped16((uint32_t)(millis()-beginMs));
+  if (elapsed>maxNotifyMs) maxNotifyMs=elapsed;
+}
+void transportTask(void*);
+
 uint16_t eventSeq = 0, statusSeq = 0, rawSeq = 0, axisSeq = 0;
 
 void pushEvent(uint8_t type, uint32_t timestamp, float gyroDps, float upG, uint8_t flags) {
   EventPacket p = {};
+  p.queuedMs = millis();
   p.b[0] = 2; p.b[1] = TRACKER_ID; p.b[2] = type; p.b[3] = flags;
   put16(p.b+4, ++eventSeq);
   put32(p.b+6, timestamp);
@@ -377,7 +406,7 @@ void startBLE() {
   BLEDevice::init(TRACKER_NAME);
   bleServer = BLEDevice::createServer();
   bleServer->setCallbacks(new BiofitServerCallbacks());
-  BLEService *svc = bleServer->createService(UUID_SERVICE);
+  BLEService *svc = bleServer->createService(BLEUUID(UUID_SERVICE), 32); // seis caracteristicas + CCCD
   chrEvents = svc->createCharacteristic(UUID_EVENTS,
     BLECharacteristic::PROPERTY_NOTIFY | BLECharacteristic::PROPERTY_READ);
   chrStatus = svc->createCharacteristic(UUID_STATUS,
@@ -389,12 +418,19 @@ void startBLE() {
     BLECharacteristic::PROPERTY_NOTIFY | BLECharacteristic::PROPERTY_READ);
   chrAxes = svc->createCharacteristic(UUID_AXES,
     BLECharacteristic::PROPERTY_NOTIFY | BLECharacteristic::PROPERTY_READ);
-  chrEvents->addDescriptor(new BLE2902());
+  eventsCccd = new BLE2902();
+  chrEvents->addDescriptor(eventsCccd);
+  chrEvents->setCallbacks(new TransportCallbacks());
   chrStatus->addDescriptor(new BLE2902());
   chrConfig->addDescriptor(new BLE2902());
   chrRaw->addDescriptor(new BLE2902());
   chrAxes->addDescriptor(new BLE2902());
   chrConfig->setCallbacks(new ConfigWriteCallbacks());
+  chrTransport = svc->createCharacteristic(UUID_TRANSPORT,
+    BLECharacteristic::PROPERTY_NOTIFY | BLECharacteristic::PROPERTY_READ);
+  chrTransport->addDescriptor(new BLE2902());
+  chrStatus->setCallbacks(new TransportCallbacks());
+  chrTransport->setCallbacks(new TransportCallbacks());
   uint8_t emptyE[16] = {}; emptyE[0]=2; emptyE[1]=TRACKER_ID;
   uint8_t emptyS[20] = {}; emptyS[0]=2; emptyS[1]=TRACKER_ID;
   chrEvents->setValue(emptyE, sizeof(emptyE));
@@ -423,6 +459,7 @@ struct MotionDetector {
   uint32_t moves = 0, ups = 0;
 };
 MotionDetector det;
+BiofitPhaseEvidence phaseEvidence; // quality hint on UP, no new event type
 float gyroBias[3] = {0,0,0};
 float verticalUnit[3] = {0,0,1};
 float gravityNorm = 1.0f;
@@ -677,6 +714,12 @@ static constexpr float AUTO_REST_STD_G = 0.025f; // desviacion tipica por eje
 static constexpr float AUTO_REST_STD_W = 2.5f;   // dps por eje
 volatile bool calibrated = false;
 volatile bool autoRestEnabled = true;
+// Main/CONFIG only requests; the IMU task owns all rest accumulators.
+volatile int8_t pendingAutoRestMode = -1;
+uint32_t rearmCount=0, blockedUpSamples=0, restRejectedWindows=0;
+uint8_t upBlockReason=0;
+static constexpr float STABLE_ACCEL_SPAN_G = 0.040f; // guards slow tilts hidden by variance
+float restMinA[3]={},restMaxA[3]={};
 volatile uint32_t autoRestCount = 0;
 volatile uint32_t autoRestLastMs = 0;
 uint32_t autoRestStartMs = 0;
@@ -721,6 +764,7 @@ void applyAutoRest(const float meanA[3], const float meanW[3], uint32_t nowMs) {
   det.moving=false;
   det.onCandidateSince=0; det.releaseSince=0;
   det.upArmed=true; det.downSeen=false; det.upEvidence=0;
+  phaseEvidence.Reset(); // only after 2-second verified raw stationary window
   ++autoRestCount;
   autoRestLastMs=nowMs;
   if (!serialPlotMode) Serial.printf("AUTO_REST OK: %lu, gyroBias=%.2f/%.2f/%.2f, grav=%.4fg, XYZ conservados=%u\n",
@@ -742,8 +786,10 @@ void observeAutoRest(const ImuSample &s, uint32_t ms) {
   // La correccion se repite tras cada nueva ventana de reposo estable.
   // Asi no se acumula deriva mientras la placa permanece inmovil.
   if (autoRestN==0) autoRestStartMs=ms;
+  if (autoRestN==0) for(int i=0;i<3;++i) restMinA[i]=restMaxA[i]=s.a[i];
   ++autoRestN;
   for (int i=0;i<3;++i) {
+    restMinA[i]=fminf(restMinA[i],s.a[i]); restMaxA[i]=fmaxf(restMaxA[i],s.a[i]);
     autoRestSumA[i]+=s.a[i];
     autoRestSumSqA[i]+=s.a[i]*s.a[i];
     autoRestSumW[i]+=s.w[i];
@@ -757,7 +803,8 @@ void observeAutoRest(const ImuSample &s, uint32_t ms) {
     meanW[i]=autoRestSumW[i]/autoRestN;
     float va=fmaxf(0.0f,autoRestSumSqA[i]/autoRestN-meanA[i]*meanA[i]);
     float vw=fmaxf(0.0f,autoRestSumSqW[i]/autoRestN-meanW[i]*meanW[i]);
-    if (va>AUTO_REST_STD_G*AUTO_REST_STD_G ||
+    if (restMaxA[i]-restMinA[i]>STABLE_ACCEL_SPAN_G ||
+        va>AUTO_REST_STD_G*AUTO_REST_STD_G ||
         vw>AUTO_REST_STD_W*AUTO_REST_STD_W) steady=false;
   }
   // Evitar confundir un giro lento y constante con reposo absoluto.
@@ -767,13 +814,14 @@ void observeAutoRest(const ImuSample &s, uint32_t ms) {
   resetAutoRestWindow();
   if (steady) {
     applyAutoRest(meanA,meanW,ms);
-  }
+  } else ++restRejectedWindows;
 }
 
 volatile bool calibrating = true;
 uint32_t calStartMs = 0;
 uint16_t calCount = 0;
 float calA[3] = {0,0,0}, calW[3] = {0,0,0};
+float calMinA[3]={},calMaxA[3]={},calSqA[3]={},calSqW[3]={};
 
 void beginCalibration(uint32_t nowMs) {
   calibrating = true;
@@ -782,6 +830,7 @@ void beginCalibration(uint32_t nowMs) {
   calCount = 0;
   for (int i=0; i<3; ++i) { calA[i]=0; calW[i]=0; }
   det = MotionDetector();
+  phaseEvidence.Reset();
   resetAutoRestWindow();
   axisReady=false; axisTiltReady=false; axisCaptureMode=0; axisRequest=0;
   finishTest();
@@ -792,13 +841,32 @@ void beginCalibration(uint32_t nowMs) {
 void calibrationSample(const ImuSample &s, uint32_t nowMs) {
   const float aNorm = length3(s.a), wNorm = length3(s.w);
   if (fabsf(aNorm - 1.0f) <= 0.14f && wNorm < 12.0f) {
-    for (int i=0; i<3; ++i) { calA[i]+=s.a[i]; calW[i]+=s.w[i]; }
+    if (calCount==0) for(int i=0;i<3;++i) {
+      calMinA[i]=calMaxA[i]=s.a[i]; calSqA[i]=calSqW[i]=0;
+    }
+    for (int i=0; i<3; ++i) {
+      calA[i]+=s.a[i]; calW[i]+=s.w[i];
+      calSqA[i]+=s.a[i]*s.a[i]; calSqW[i]+=s.w[i]*s.w[i];
+      calMinA[i]=fminf(calMinA[i],s.a[i]); calMaxA[i]=fmaxf(calMaxA[i],s.a[i]);
+    }
     ++calCount;
   } else {
     calCount=0;
     for (int i=0; i<3; ++i) { calA[i]=0; calW[i]=0; }
   }
   if (calCount >= 170) {
+    // Norm and gyro magnitude alone also accept a rotating sensor.
+    bool stable=true;
+    for(int i=0;i<3;++i) {
+      float ma=calA[i]/calCount,mw=calW[i]/calCount;
+      if(calMaxA[i]-calMinA[i]>STABLE_ACCEL_SPAN_G ||
+         calSqA[i]/calCount-ma*ma>AUTO_REST_STD_G*AUTO_REST_STD_G ||
+         calSqW[i]/calCount-mw*mw>AUTO_REST_STD_W*AUTO_REST_STD_W) stable=false;
+    }
+    if(!stable) {
+      calCount=0; for(int i=0;i<3;++i) calA[i]=calW[i]=0;
+      return;
+    }
     for (int i=0; i<3; ++i) {
       gyroBias[i] = calW[i] / calCount;
       verticalUnit[i] = calA[i] / calCount;
@@ -820,7 +888,14 @@ void calibrationSample(const ImuSample &s, uint32_t nowMs) {
 }
 
 void processSample(const ImuSample &s, float dt) {
-  const uint32_t ms = s.us / 1000UL;
+  const uint32_t ms = s.ms;
+  portENTER_CRITICAL(&dataMux);
+  int8_t autoMode=pendingAutoRestMode; pendingAutoRestMode=-1;
+  portEXIT_CRITICAL(&dataMux);
+  if (autoMode>=0) {
+    autoRestEnabled=autoMode==1;
+    resetAutoRestWindow();
+  }
   if (requestCalibration) {
     requestCalibration = false;
     beginCalibration(ms);
@@ -828,8 +903,18 @@ void processSample(const ImuSample &s, float dt) {
   if (calibrating) {
     calibrationSample(s, ms);
     LiveData d = liveSnapshot();
-    d.ms = ms; d.flags = 0x08 | (calibrating ? 0x10 : 0x04);
+    d.ms = ms; d.flags = 0x80 | 0x08 | (calibrating ? 0x10 : 0x04) |
+      (!calibrating && det.upArmed ? 0x40:0) | (axisReady?0x20:0);
     d.imuHz = imuRateHz;
+    d.restCount=(uint16_t)min((uint32_t)autoRestCount,(uint32_t)65535);
+    d.disarmedMs=det.upArmed ? 0 : (uint16_t)min((uint32_t)(ms-det.lastUpMs),(uint32_t)65535);
+    d.biasNormX100=(uint16_t)min((uint32_t)lroundf(length3(gyroBias)*100),(uint32_t)65535);
+    d.gravityMg=(uint16_t)lroundf(gravityNorm*1000);
+    d.velocityMmS=toI16(shortV*1000); d.calSamples=calCount;
+    d.rearms=(uint16_t)min(rearmCount,(uint32_t)65535);
+    d.blockedSamples=(uint16_t)min(blockedUpSamples,(uint32_t)65535);
+    d.restRejected=(uint16_t)min(restRejectedWindows,(uint32_t)65535);
+    d.upBlockReason=upBlockReason; d.autoEnabled=autoRestEnabled?1:0;
     setLive(d);
     return;
   }
@@ -928,27 +1013,35 @@ void processSample(const ImuSample &s, float dt) {
     } else det.releaseSince=0;
   }
 
+  // Phase evidence observes EVERY IMU sample at ~224Hz; the legacy UP detector
+  // remains unchanged. A positive acceleration alone is not upward velocity.
+  phaseEvidence.Observe(ms,fUp,gyro,fActivity,aNorm,gravityNorm);
   // UP = candidato a impulso ascendente (no altura ni salto confirmado).
   if (!det.upArmed) {
     if (fUp < -c.upOnG*0.55f) det.downSeen=true;
     if ((uint32_t)(ms-det.lastUpMs) >= c.upGapMs &&
-        (det.downSeen || quiet) && fUp < c.upOnG*0.35f) {
-      det.upArmed = true; det.downSeen = false; det.upEvidence = 0;
+        (quiet || (det.downSeen && fUp < c.upOnG*0.35f))) {
+      det.upArmed = true; det.downSeen = false; det.upEvidence = 0; ++rearmCount;
     }
   }
   const bool upCandidate = fUp >= c.upOnG &&
     fActivity >= c.upActG && shortV >= c.upVms;
+  // Bitmask of current blockers; blockedSamples counts samples, NOT gestures.
+  upBlockReason=(fUp<c.upOnG?1:0)|(fActivity<c.upActG?2:0)|(shortV<c.upVms?4:0)|
+    (!det.upArmed?8:0)|(!det.upArmed && (uint32_t)(ms-det.lastUpMs)<c.upGapMs?16:0);
+  if(upCandidate && !det.upArmed) ++blockedUpSamples;
   if (det.upArmed) {
     det.upEvidence = upCandidate ? (uint8_t)min(3,(int)det.upEvidence+1) : 0;
     if (det.upEvidence >= 2) {
       det.upArmed=false; det.upEvidence=0; det.downSeen=false;
       det.lastUpMs=ms; det.lastUpEventMs=ms; ++det.ups;
-      pushEvent(3,ms,gyro,fUp,0x03);
+      const bool phaseReady = phaseEvidence.OnUp(ms);
+      pushEvent(3,ms,gyro,fUp,(uint8_t)(0x03 | (phaseReady ? 0x10 : 0x00)));
     }
   }
 
   const float scaledMotion = fmaxf(gyro/c.movOnDps, fActivity/c.movOnG);
-  LiveData d;
+  LiveData d = {};
   d.ms = ms;
   d.rawAxMg=toI16(s.a[0]*1000.0f); d.rawAyMg=toI16(s.a[1]*1000.0f);
   d.rawAzMg=toI16(s.a[2]*1000.0f);
@@ -967,7 +1060,16 @@ void processSample(const ImuSample &s, float dt) {
   d.intensity=(uint8_t)constrain((int)(scaledMotion*50),0,100);
   d.flags=(det.moving ? 0x01 : 0) |
     ((uint32_t)(ms-det.lastUpEventMs)<130 && det.ups>0 ? 0x02:0) |
-    0x04 | 0x08 | (axisReady ? 0x20 : 0);
+    0x04 | 0x08 | 0x80 | (det.upArmed ? 0x40 : 0) | (axisReady ? 0x20 : 0);
+  d.restCount=(uint16_t)min((uint32_t)autoRestCount,(uint32_t)65535);
+  d.disarmedMs=det.upArmed ? 0 : (uint16_t)min((uint32_t)(ms-det.lastUpMs),(uint32_t)65535);
+  d.biasNormX100=(uint16_t)min((uint32_t)lroundf(length3(gyroBias)*100),(uint32_t)65535);
+  d.gravityMg=(uint16_t)lroundf(gravityNorm*1000);
+  d.velocityMmS=toI16(shortV*1000); d.calSamples=calCount;
+  d.rearms=(uint16_t)min(rearmCount,(uint32_t)65535);
+  d.blockedSamples=(uint16_t)min(blockedUpSamples,(uint32_t)65535);
+  d.restRejected=(uint16_t)min(restRejectedWindows,(uint32_t)65535);
+  d.upBlockReason=upBlockReason; d.autoEnabled=autoRestEnabled?1:0;
   setLive(d);
 }
 
@@ -991,7 +1093,7 @@ void imuTask(void*) {
     ulTaskNotifyTake(pdTRUE,pdMS_TO_TICKS(3));
     if (!readSample(s)) continue;
     ++imuSamples;
-    const uint32_t ms=s.us/1000UL;
+    const uint32_t ms=s.ms;
     float dt=1.0f/ODR_HZ;
     if (lastUs!=0) {
       dt=(uint32_t)(s.us-lastUs)*1e-6f;
@@ -1095,9 +1197,10 @@ void runCommand(String command) {
     return;
   }
   if (command=="AUTO,1" || command=="AUTO,0") {
-    autoRestEnabled=command.endsWith("1");
-    resetAutoRestWindow();
-    replyConfig(autoRestEnabled?"OK,AUTO,1":"OK,AUTO,0"); return;
+    portENTER_CRITICAL(&dataMux);
+    pendingAutoRestMode=command.endsWith("1")?1:0;
+    portEXIT_CRITICAL(&dataMux);
+    replyConfig(command.endsWith("1")?"OK,AUTO,1":"OK,AUTO,0"); return;
   }
   if (command=="AUTO,STAT") {
     if (!serialPlotMode) Serial.printf("AUTO REST: %s, reposo=%lums, correcciones=%lu, ultima=%lums\n",
@@ -1207,7 +1310,7 @@ void drawStaticScreen() {
   lcd->setTextColor(C_WHITE); lcd->setTextSize(2);
   lcd->setCursor(10,5); lcd->print("BIOFIT GAME");
   lcd->setTextSize(1); lcd->setCursor(10,27);
-  lcd->print(TRACKER_LABEL); lcd->print("  v2.2.5");
+  lcd->print(TRACKER_LABEL); lcd->print("  v2.2.8 EXP");
   lcd->drawFastHLine(0,130,320,C_BLUE);
 }
 void drawDynamicScreen() {
@@ -1266,12 +1369,15 @@ void drawDynamicScreen() {
 // =========================== MAIN ===================================
 void setup() {
   Serial.begin(115200);
+#if ARDUINO_USB_CDC_ON_BOOT
+  Serial.setTxTimeoutMs(0); // USB ausente/lento no debe frenar adquisicion
+#endif
   delay(350);
   // Leer NVS antes de imprimir: si se abre el Plotter y ocurre un reset,
   // ninguna linea de texto no numerico contamina las curvas.
   loadConfig();
   loadSavedAxisMap();
-  if (!serialPlotMode) Serial.printf("\nBIOFIT GAME v2.2.5 XYZ+PLOT | ID=%d | %s\n", TRACKER_ID, TRACKER_NAME);
+  if (!serialPlotMode) Serial.printf("\nBIOFIT GAME v2.2.7 XYZ+PLOT | ID=%d | %s\n", TRACKER_ID, TRACKER_NAME);
   if (!serialPlotMode) Serial.println("MOV es movimiento estimado. UP es candidato, NO altura/salto confirmado.");
 
   eventQueue=xQueueCreate(32,sizeof(EventPacket));
@@ -1299,6 +1405,10 @@ void setup() {
   if (!serialPlotMode) Serial.printf("QMI8658: 0x%02X, ODR nominal 224.2Hz, +/-8g, +/-512dps\n",imuAddr);
   startBLE();
   xTaskCreatePinnedToCore(imuTask,"BIOFIT_IMU",8192,nullptr,5,&imuTaskHandle,1);
+  if (xTaskCreatePinnedToCore(transportTask,"BIOFIT_BLE_TX",6144,nullptr,2,nullptr,1)!=pdPASS) {
+    if (!serialPlotMode) Serial.println("FATAL: tarea BLE TX");
+    while(true) delay(1000);
+  }
   pinMode(IMU_INT2,INPUT);
   attachInterrupt(digitalPinToInterrupt(IMU_INT2),imuIRQ,RISING);
   if (!serialPlotMode) Serial.println("Serial: CAL, AXIS,TILT, AXIS,APPLY, AXIS,SHOW, TEST,REST, TEST,UP, TEST,X, TEST,Y, TEST,ROT");
@@ -1333,7 +1443,7 @@ void loop() {
   // No escritura Serial desde la IMU al usar PLOT; graficar desde loop.
   // Antes de AXIS OK, no rotulamos datos crudos como anatomicos:
   // las tres lineas permanecen en cero hasta calibrar la transformacion.
-  if (serialPlotMode && (uint32_t)(now-lastPlot)>=plotEveryMs) {
+  if (serialPlotMode && Serial.availableForWrite()>=64 && (uint32_t)(now-lastPlot)>=plotEveryMs) {
     lastPlot=now;
     const LiveData p=liveSnapshot();
     if ((p.flags & 0x20) && (p.flags & 0x04)) {
@@ -1353,13 +1463,36 @@ void loop() {
   }
   prevConnected=connected;
 
-  // Eventos urgentes se procesan ANTES de dibujar la LCD.
+  if ((uint32_t)(now-lastScreen)>=SCREEN_EVERY_MS) {
+    lastScreen=now;
+    drawDynamicScreen();
+  }
+  delay(2);
+}
+
+void transportTask(void*) {
+  for (;;) {
+  // Unico propietario de EVENT/STATUS/RAW/AXES/TRANSPORT. Sin LCD, NVS ni Serial.
+  const uint32_t now=millis();
+  const bool connected=bleConnected;
+  static uint32_t lastPass=0, lastTransport=0;
+  if (lastPass) {
+    const uint16_t gap=capped16((uint32_t)(now-lastPass));
+    if (gap>maxTransportGapMs) maxTransportGapMs=gap;
+  }
+  lastPass=now;
+  const UBaseType_t depth=uxQueueMessagesWaiting(eventQueue);
+  if (depth>queueHighWater) queueHighWater=(uint16_t)depth;
   EventPacket evt;
   uint8_t drained=0;
   while (drained<8 && xQueueReceive(eventQueue,&evt,0)==pdTRUE) {
-    if (connected && chrEvents) {
+    if (connected && chrEvents && eventsCccd->getNotifications()) {
+      const uint16_t age=capped16((uint32_t)(millis()-evt.queuedMs));
+      if (age>maxQueueAgeMs) maxQueueAgeMs=age;
+      evt.b[3] |= 0x80; // V2 extension: bytes 14..15 = espera en cola firmware, ms
+      put16(evt.b+14,age);
       chrEvents->setValue(evt.b,sizeof(evt.b));
-      chrEvents->notify();
+      timedNotify(chrEvents);
     }
     ++drained;
   }
@@ -1373,7 +1506,7 @@ void loop() {
     put16(p+14,(uint16_t)d.activityMg); put16(p+16,d.imuHz);
     put16(p+18,(uint16_t)(i2cErrors & 0xFFFF));
     chrStatus->setValue(p,sizeof(p));
-    if (connected) chrStatus->notify();
+    if (connected) timedNotify(chrStatus);
   }
   if (streamRaw && (uint32_t)(now-lastRaw)>=RAW_EVERY_MS) {
     lastRaw=now;
@@ -1384,7 +1517,7 @@ void loop() {
     put16(p+14,(uint16_t)d.rawGxX10); put16(p+16,(uint16_t)d.rawGyX10);
     put16(p+18,(uint16_t)d.rawGzX10);
     chrRaw->setValue(p,sizeof(p));
-    if (connected) chrRaw->notify();
+    if (connected) timedNotify(chrRaw);
   }
   if (streamAxes && (uint32_t)(now-lastAxes)>=AXES_EVERY_MS) {
     lastAxes=now;
@@ -1395,11 +1528,41 @@ void loop() {
     put16(p+12,(uint16_t)d.bodyAzMg); put16(p+14,(uint16_t)d.bodyGxX10);
     put16(p+16,(uint16_t)d.bodyGyX10); put16(p+18,(uint16_t)d.bodyGzX10);
     chrAxes->setValue(p,sizeof(p));
-    if (connected && (d.flags&0x20)) chrAxes->notify();
+    if (connected && (d.flags&0x20)) timedNotify(chrAxes);
   }
-  if ((uint32_t)(now-lastScreen)>=SCREEN_EVERY_MS) {
-    lastScreen=now;
-    drawDynamicScreen();
+  if (connected && (uint32_t)(now-lastTransport)>=1000) {
+    lastTransport=now;
+    uint8_t p[20]={1,TRACKER_ID};
+    put16(p+2,++transportSeq); put32(p+4,millis());
+    put16(p+8,queueHighWater); put16(p+10,capped16(droppedEvents));
+    put16(p+12,maxQueueAgeMs); put16(p+14,maxNotifyMs);
+    put16(p+16,maxTransportGapMs); put16(p+18,capped16(notifyErrors));
+    chrTransport->setValue(p,sizeof(p)); timedNotify(chrTransport);
+    // V2 diagnostic extension, <=20 bytes. Existing V1 transport stays intact.
+    // State at 1Hz; one configuration/counter page per second (cycle 3s).
+    uint8_t q[20]={2,TRACKER_ID,0,d.flags}; put32(q+4,d.ms);
+    put16(q+8,d.restCount); put16(q+10,d.disarmedMs);
+    put16(q+12,(uint16_t)d.upMg); put16(q+14,(uint16_t)d.velocityMmS);
+    put16(q+16,d.biasNormX100); put16(q+18,d.gravityMg);
+    chrTransport->setValue(q,sizeof(q)); timedNotify(chrTransport);
+    static uint8_t page=1;
+    const RuntimeConfig c=configSnapshot();
+    q[2]=page; q[3]=d.autoEnabled;
+    if(page==1) {
+      put16(q+8,toI16(c.upOnG*1000)); put16(q+10,toI16(c.upActG*1000));
+      put16(q+12,toI16(c.upVms*1000)); put16(q+14,c.upGapMs);
+      put16(q+16,toI16(c.movOffG*1000)); put16(q+18,toI16(c.filterHz*100));
+    } else if(page==2) {
+      put16(q+8,toI16(c.movOnDps*10)); put16(q+10,toI16(c.movOffDps*10));
+      put16(q+12,toI16(c.movOnG*1000)); put16(q+14,c.confirmMs);
+      put16(q+16,c.releaseMs); put16(q+18,AUTO_REST_MS);
+    } else {
+      put16(q+8,d.rearms); put16(q+10,d.upBlockReason); put16(q+12,d.blockedSamples);
+      put16(q+14,d.calSamples); put16(q+16,d.restRejected); put16(q+18,228);
+    }
+    chrTransport->setValue(q,sizeof(q)); timedNotify(chrTransport);
+    page=page==3?1:page+1;
   }
-  delay(2);
+    vTaskDelay(pdMS_TO_TICKS(2));
+  }
 }
