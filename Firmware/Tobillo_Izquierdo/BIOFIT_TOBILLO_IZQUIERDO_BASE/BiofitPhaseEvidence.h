@@ -64,10 +64,15 @@ struct BiofitPhaseEvidence
   {
     const bool evidence=ready;
     if(evidence) ++qualified; else ++unqualified;
-    ready=false;
-    sawNegativePhase=false;
-    quietCounting=false;
-    lastUpMs=nowMs;
+    // IMPORTANT: a rejected/braking UP must NOT restart the whole cycle.
+    // Otherwise every landing artifact can postpone rearm indefinitely.
+    if(evidence)
+    {
+      ready=false;
+      sawNegativePhase=false;
+      quietCounting=false;
+      lastUpMs=nowMs;
+    }
     return evidence;
   }
 };
