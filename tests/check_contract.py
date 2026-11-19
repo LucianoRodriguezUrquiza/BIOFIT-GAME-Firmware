@@ -8,6 +8,8 @@ assert re.sub(r'#define TRACKER_ID [12]', '#define TRACKER_ID X',a) == re.sub(r'
 assert '#define TRACKER_ID 2' in a and '#define TRACKER_ID 1' in b
 headers=sorted(root.glob('Firmware/**/BiofitPhaseEvidence.h'))
 assert len(headers)==2 and headers[0].read_bytes()==headers[1].read_bytes()
+lift_headers=sorted(root.glob('Firmware/**/BiofitLiftCycle.h'))
+assert len(lift_headers)==2 and lift_headers[0].read_bytes()==lift_headers[1].read_bytes()
 for p in paths:
     now=p.read_text()
     old=subprocess.check_output(['git','show','9bb4183:'+str(p.relative_to(root))],cwd=root,text=True)
@@ -23,12 +25,15 @@ for p in paths:
                 level-=1
                 if level==0:return src[begin:i+1]
     for name in ['loadConfig','saveConfig','loadSavedAxisMap','saveAxisMapInMainLoop','tryRestoreSavedAxisMap','applyAutoRest']:
-        new=function(now,name).replace('  phaseEvidence.Reset(); // only after 2-second verified raw stationary window\n','')
+        new=function(now,name).replace('  liftCycle.Reset();\n','').replace('  phaseEvidence.Reset(); // only after 2-second verified raw stationary window\n','')
         assert function(old,name).replace('s.us / 1000UL','s.ms')==new,name
+    assert now.count('liftCycle.Reset();')==2
+    assert 'pushEvent(4,ms,gyro,fUp-liftCycle.biasG,0x20)' in now
+    assert 'uint8_t l[20]={3,TRACKER_ID,d.liftState,d.liftReason}' in now
     assert now.count('phaseEvidence.Reset();') == 2  # CAL and auto-rest only
     assert 'pushEvent(3,ms,gyro,fUp,(uint8_t)(0x03 | (phaseReady ? 0x10 : 0x00)))' in now
     assert 'phaseEvidence.Observe(ms,fUp,gyro,fActivity,aNorm,gravityNorm)' in now
-    assert 'put16(q+18,228)' in now
+    assert 'put16(q+18,229)' in now
     assert now.count('d.restCount=(uint16_t)min(')==2
     assert 's.us/1000UL' not in now and 's.us / 1000UL' not in now
     tx=now[now.index('void transportTask(void*) {'):]

@@ -52,4 +52,17 @@ int main(int argc,char**) {
  // Rollover with actual uint32 timestamps used by processSample.
  boot();nowMs=0xfffff000u;det.lastUpMs=nowMs-1000;stationary(1000);int n=ups();gesture();assert(ups()==n+1);
  std::cout<<"PASS rollover, no duplicate rest impulses\n";
+ if(!baseline) {
+  boot();stationary(50);autoRestEnabled=false;
+  for(int n=0;n<30;n++) {
+   for(int i=0;i<30;i++)sample(0,0,1.3f);
+   for(int i=0;i<60;i++)sample(0,0,.7f);
+   for(int i=0;i<30;i++)sample(0,0,1.3f);
+   stationary(40);
+  }
+  int count=0;for(auto e:events)if(e.type==4)++count;
+  std::cout<<"Actual .ino + filter: LIFT_ONSET="<<count<<" legacy UP="<<ups()<<" /30 synthetic cycles\n";
+  assert(count==30);
+ }
+
 }
