@@ -1,0 +1,26 @@
+{
+  "version": "2.2.9",
+  "state": "estable de trabajo aprobada por el usuario",
+  "acceptance_date": "2026-11-26",
+  "source_commit": "274625f605ea92189abfb16275012f34ee14371f",
+  "previous_main": "9bb4183db5d2bfd76bc0d9aeefd203d0543b315d",
+  "previous_version": "2.2.5 obsoleta para desarrollo activo; historial preservado",
+  "ci": {
+    "run_id": 44444687178,
+    "commit": "274625f605ea92189abfb16275012f34ee14371f",
+    "conclusion": "success",
+    "passed": 3,
+    "total": 3,
+    "jobs": [
+      "compile (Izquierdo)",
+      "compile (Derecho)",
+      "source-contract"
+    ]
+  },
+  "physical_validation_independent": false,
+  "installed_binary_and_nvs_verified": false,
+  "lift_onset": "experimental",
+  "legacy_preserved": true,
+  "source_changed_by_consolidation": false,
+  "known_pending": "degradación progresiva de saltos consecutivos; causa no determinada"
+}

@@ -1,5 +1,7 @@
 # v2.2.9 EXP: canal de inicio de ciclo, separado de UP legacy
 
+> Nota de vigencia (26/11/2026): V2.2.9 fue aprobada por el usuario como firmware estable de trabajo y autorizada para main. El canal LIFT_ONSET conserva su carácter experimental; no se afirma validación física exhaustiva. Las referencias a ramas y estados de esta revisión describen el desarrollo histórico. Ver [consolidación](CONSOLIDACION_V229.md).
+
 Base: `feat/phase-evidence-v228` / `0947a509a32ae3b17390d20cfe21ba0f508d0d03`.
 Rama: `feat/lift-cycle-v229`. Compañero: Unity `feat/reliable-consecutive-jumps-v0911`.
 Estado: **algoritmo experimental, sin validación física**. No certifica contacto plantar ni fase biomecánica. No reemplaza el detector legacy.

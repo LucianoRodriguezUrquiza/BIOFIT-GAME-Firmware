@@ -1,14 +1,26 @@
-# BIOFIT GAME — Firmware de tobillos
+# BIOFIT GAME — Universal Tracker V2.2.9
 
-Firmware en desarrollo para dos trackers corporales **Waveshare ESP32-S3-LCD-1.47B** con IMU **QMI8658**, uno en cada tobillo. Forma parte del proyecto **BIOFIT GAME**, una plataforma de exergaming que utilizará un smartphone Android como consola y recibirá datos de sensores mediante Bluetooth Low Energy (BLE).
+**Estado vigente (26/11/2026): V2.2.9, versión estable de trabajo aprobada por el usuario y autorizada para consolidación en main.** V2.2.5 queda obsoleta como referencia de trabajo; se conserva exclusivamente su historial y su uso como referencia de regresión. No se han modificado los sketches ni sus cabeceras respecto del código V2.2.9 publicado en `274625f605ea92189abfb16275012f34ee14371f`.
+
+- Compilación ESP32 de ambos roles y pruebas host: [GitHub Actions 44444687178](https://github.com/LucianoRodriguezUrquiza/BIOFIT-GAME-Firmware/actions/runs/44444687178), 3/3 jobs correctos.
+- Aceptación del usuario: versión de referencia actual para los trackers de BIOFIT DASH V6.5. No equivale a validación física exhaustiva, confirmación independiente de binarios/NVS instalados o certificación del canal experimental LIFT_ONSET.
+- Control principal: BLE BILATERAL LEGACY, UP_IMPULSE. LIFT_ONSET sigue siendo un canal experimental separado, no sustituye LEGACY.
+- Pendiente: diagnosticar la degradación de la detección tras varios saltos y recuperación después de 20–30 s de reposo. No se atribuye causa todavía ni se modifica el algoritmo en esta consolidación.
+- [Contexto actual](docs/CONTEXTO_ACTUAL.md), [relevo vivo](docs/CONTEXTO_VIVO.md), [validación y consolidación V2.2.9](docs/CONSOLIDACION_V229.md), [revisión técnica Lift Cycle](docs/REVISION_V229_CICLO.md).
+- Descargar la rama main completa y conservar ambos archivos .h junto al .ino de cada tobillo. No reprogramar para diagnosticar el fallo sin identificar primero versión efectiva, parámetros NVS y estado de los trackers.
+
+
+## Hardware y utilización
+
+Firmware para dos trackers corporales **Waveshare ESP32-S3-LCD-1.47B** con IMU **QMI8658**, uno en cada tobillo. Forma parte del proyecto **BIOFIT GAME**, una plataforma de exergaming que utilizará un smartphone Android como consola y recibirá datos de sensores mediante Bluetooth Low Energy (BLE).
 
 ## Estado del proyecto
 
-- Versión indicada por ambos códigos: **Universal Tracker v2.2.7**.
+- Versión indicada por ambos códigos: **Universal Tracker v2.2.9**.
 - Revisión de estabilidad, pruebas y sesión consolidada: [REVISION_V08](docs/REVISION_V08.md).
 - Los dos sketch son iguales salvo por `#define TRACKER_ID`.
-- Los algoritmos actuales identifican actividad `MOV_ON` / `MOV_OFF` y un candidato `UP_IMPULSE`; **no confirman por sí solos pasos biomecánicos ni saltos**. La futura aplicación Unity deberá combinar información de ambos tobillos para decidir `STEP`, `WALK`, `RUN` y `JUMP`.
-- Este repositorio reúne los archivos fuente proporcionados; **no implica que hayan sido compilados o probados de nuevo**.
+- Los algoritmos actuales identifican actividad `MOV_ON` / `MOV_OFF` y un candidato `UP_IMPULSE`; **no confirman por sí solos pasos biomecánicos ni saltos**. Unity BIOFIT DASH combina la información de ambos tobillos para decidir acciones bilaterales.
+- La compilación y regresión host se verificaron en el commit indicado arriba; los ensayos físicos independientes siguen pendientes.
 
 ## Estructura
 
@@ -22,7 +34,7 @@ Firmware/
         └── BIOFIT_TOBILLO_DERECHO_BASE.ino
 ```
 
-La revisión 2.2.7 conserva el transporte de 2.2.6 y corrige estabilidad de calibración/auto-reposo y rearme. Conserva NVS y mapa anatómico; los sketch mantienen su carpeta homónima requerida por Arduino IDE.
+Históricamente, la revisión 2.2.7 conserva el transporte de 2.2.6 y corrige estabilidad de calibración/auto-reposo y rearme. Conserva NVS y mapa anatómico; los sketch mantienen su carpeta homónima requerida por Arduino IDE.
 
 ## Dispositivos
 
@@ -67,13 +79,13 @@ Ambas placas se instalan sobre el lado **izquierdo anatómico** de cada pierna, 
 
 ## Próximos pasos
 
-Validar señales y calibración en ambos tobillos, caracterizar los movimientos reales, comprobar comunicación BLE simultánea y luego construir el receptor Unity/Android. No se incluye todavía un proyecto Unity en este repositorio.
+Diagnosticar el problema de detección sostenida sin modificar firmware ni NVS hasta obtener evidencia. El proyecto Unity/Android se mantiene en [BIOFIT-GAME-UNITY](https://github.com/LucianoRodriguezUrquiza/BIOFIT-GAME-UNITY), versión V6.5.
 
 ## Licencia
 
 No se agregó ninguna licencia. Elegir una licencia explícita antes de autorizar la reutilización por terceros.
 
-## Revisión de transporte 2.2.6
+## Historial — revisión de transporte 2.2.6
 
 La rama `fix/ble-latency-consolidated` separa TX BLE de LCD/USB/NVS,
 reduce STATUS a 10 Hz, corrige los timestamps a `millis()` y añade diagnóstico
