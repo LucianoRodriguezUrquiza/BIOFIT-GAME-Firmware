@@ -6,6 +6,8 @@ sketch=next(root.glob('Firmware/Tobillo_Izquierdo/**/*.ino'))
 s=sketch.read_text()
 if '--baseline' in sys.argv:
  s=subprocess.check_output(['git','show','f52b188:'+str(sketch.relative_to(root))],cwd=root,text=True)
+elif '--reference-v229' in sys.argv:
+ s=subprocess.check_output(['git','show','7afb20df8ace2b4c61153474649d31a36040dee1:'+str(sketch.relative_to(root))],cwd=root,text=True)
 def function(name):
  import re
  m=re.search(r'(?:void|bool|float|static int16_t|RuntimeConfig) '+name+r'\([^;]*?\)\s*\{',s);assert m,name
@@ -39,7 +41,7 @@ pre+=(sketch.parent/'BiofitPhaseEvidence.h').read_text().replace('#pragma once',
 pre+=section('struct MotionDetector {','// Los vectores de montaje se guardan')
 pre+=function('tryRestoreSavedAxisMap')+'\nvoid axisCaptureStep(const ImuSample&){}void finishTest(){activeTest=0;}void startTest(uint8_t,uint32_t){}\n'
 pre+=section('float fGyro[3]', 'TaskHandle_t imuTaskHandle')
-harness=Path(__file__).with_name('replay_diagnostics.cpp' if '--diagnostics' in sys.argv else 'replay.cpp')
+harness=Path(__file__).with_name('replay_equivalence.cpp' if '--equivalence' in sys.argv else 'replay_diagnostics.cpp' if '--diagnostics' in sys.argv else 'replay.cpp')
 if '--raw-input' in sys.argv:
  harness=Path(__file__).with_name('replay_raw.cpp')
  rawPath=sys.argv[sys.argv.index('--raw-input')+1]

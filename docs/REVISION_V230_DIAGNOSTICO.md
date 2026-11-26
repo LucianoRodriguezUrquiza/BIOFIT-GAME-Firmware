@@ -47,3 +47,6 @@ No se implementa Shadow Mode de Unity, protocolo bilateral de confirmación desd
 
 ### RCA: revisión preventiva de temporización
 La primera ejecución 45912598811 detectó una advertencia de indentación convertida en error en el nuevo arnés C++; se corrige sin desactivar -Werror. Se refuerzan los dwell de cambio de perfil/rearme contra huecos de muestreo >30 ms, timestamps de muestra anteriores a la orden BLE y se exige giro crudo bajo para el cambio. La prueba de rearme extra verifica el bit de telemetría, no solo el estado armado. Nueva ejecución pendiente.
+
+### RCA: equivalencia de perfil 0
+Se añadió comparación de huella exacta de estados y eventos del processSample real de V2.2.9 (commit 7afb20d) con perfil 0 de V2.3.0. Secuencias deterministas con ruido, cadencia, cambios de configuración, reposo, huecos y rollover; no equivale a medición de CPU/BLE ni movimiento real. Se conserva el CI previo 45912654252 (host aprobado); repetir compilación y pruebas en el nuevo commit.
