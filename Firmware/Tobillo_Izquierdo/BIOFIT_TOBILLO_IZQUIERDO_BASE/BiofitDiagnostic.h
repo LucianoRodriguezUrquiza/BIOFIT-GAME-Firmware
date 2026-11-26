@@ -28,7 +28,7 @@ inline bool ParseFields(const char* s,uint16_t* out,size_t n) {
 struct Control {
   uint8_t active=0,target=0,state=0; // 0 applied, 1 pending, 2 expired
   uint16_t token=0;
-  uint32_t requested=0,quietSince=0;
+  uint32_t requested=0,quietSince=0,lastObservation=0;
   bool quietCounting=false;
   bool Request(uint16_t mask,uint16_t id,uint32_t now) {
     if(!ValidMask(mask)||id==0)return false;
@@ -40,15 +40,20 @@ struct Control {
   }
   bool Observe(uint32_t now,bool quiet) {
     if(state!=1)return false;
-    if(uint32_t(now-requested)>=RequestTimeoutMs){state=2;quietCounting=false;return false;}
+    // A sample acquired just before a command may be processed after it.
+    const uint32_t elapsed=uint32_t(now-requested);
+    if(elapsed>0x7fffffffu)return false;
+    if(elapsed>=RequestTimeoutMs){state=2;quietCounting=false;return false;}
     if(!quiet){quietCounting=false;return false;}
+    if(quietCounting&&uint32_t(now-lastObservation)>30u)quietCounting=false;
+    lastObservation=now;
     if(!quietCounting){quietCounting=true;quietSince=now;}
     if(uint32_t(now-quietSince)<SettleMs)return false;
     active=target;state=0;quietCounting=false;return true;
   }
 };
 struct Rearm {
-  bool counting=false;uint32_t since=0;
+  bool counting=false;uint32_t since=0,lastObservation=0;
   void Reset(){counting=false;since=0;}
   bool Observe(uint32_t now,bool armed,uint32_t sinceUp,uint32_t minGap,
                float up,float activity,float gyro,float velocity) {
@@ -58,6 +63,8 @@ struct Rearm {
       activity>=0&&activity<=.055f&&gyro>=0&&gyro<=20.f&&
       velocity>=-.08f&&velocity<=.015f;
     if(!valley){Reset();return false;}
+    if(counting&&uint32_t(now-lastObservation)>30u)counting=false;
+    lastObservation=now;
     if(!counting){counting=true;since=now;}
     return uint32_t(now-since)>=60u;
   }

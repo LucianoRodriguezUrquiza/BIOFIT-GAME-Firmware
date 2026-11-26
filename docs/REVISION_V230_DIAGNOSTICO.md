@@ -44,3 +44,6 @@ CI añade tests del helper (gramática, reintentos, estados, rollover, filtros, 
 
 ## Límites
 No se implementa Shadow Mode de Unity, protocolo bilateral de confirmación desde UI ni clasificador nuevo; los perfiles reales operan de a uno por tracker, pueden interactuar. El piso 0.12 no soluciona por sí mismo un detector que no emite; alternativa posterior: detector sombra Unity con umbrales distintos. No se garantiza ausencia de errores o mejora física. NVS y firmware instalado no se han leído de las placas. Mantener ICC/DIPL/RFD/BRO/FLM/RCA.
+
+### RCA: revisión preventiva de temporización
+La primera ejecución 45912598811 detectó una advertencia de indentación convertida en error en el nuevo arnés C++; se corrige sin desactivar -Werror. Se refuerzan los dwell de cambio de perfil/rearme contra huecos de muestreo >30 ms, timestamps de muestra anteriores a la orden BLE y se exige giro crudo bajo para el cambio. La prueba de rearme extra verifica el bit de telemetría, no solo el estado armado. Nueva ejecución pendiente.

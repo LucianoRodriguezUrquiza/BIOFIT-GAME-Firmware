@@ -968,7 +968,7 @@ void processSample(const ImuSample &s, float dt) {
   const float legacyUp = s.a[0]*verticalUnit[0] + s.a[1]*verticalUnit[1] +
                    s.a[2]*verticalUnit[2] - gravityNorm;
   // Profile switches occur at a low-energy stationary window, never mid-jump.
-  const bool profileQuiet=gyro<7.f && fActivity<.035f && fabsf(aNorm-gravityNorm)<.035f &&
+  const bool profileQuiet=dt>0 && dt<=.030f && length3(w)<7.f && gyro<7.f && fActivity<.035f && fabsf(aNorm-gravityNorm)<.035f &&
     fabsf(legacyUp)<.045f && fabsf(fUp)<.045f && fabsf(shortV)<.06f;
   portENTER_CRITICAL(&dataMux);
   const bool changed=diagnosticControl.Observe(ms,profileQuiet);

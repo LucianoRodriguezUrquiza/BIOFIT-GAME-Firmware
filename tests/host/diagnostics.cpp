@@ -10,15 +10,20 @@ int main(){
   for(const char* bad:{"","1,","1,2,","-1,2","1,65536","1,2x","1,2,3","1,,2","1, 2"})assert(!ParseFields(bad,a,2));
   Control c;assert(c.active==0);assert(!c.Request(16,1,0));assert(!c.Request(1,0,0));
   assert(c.Request(15,1,100));assert(c.Request(15,1,110));assert(!c.Request(0,1,110));assert(!c.Request(0,2,110));
-  assert(!c.Observe(200,true));assert(!c.Observe(449,true));assert(!c.Observe(450,false));
-  assert(!c.Observe(500,true));assert(c.Observe(750,true)&&c.active==15&&c.state==0);
+  assert(!c.Observe(99,true));assert(c.state==1); // older in-flight sample
+  assert(!c.Observe(200,true));assert(!c.Observe(449,true)); // gap does not count as dwell
+  assert(!c.Observe(450,false));
+  for(uint32_t t=500;t<750;t+=10)assert(!c.Observe(t,true));
+  assert(c.Observe(750,true)&&c.active==15&&c.state==0);
   assert(c.Request(0,2,800));assert(!c.Observe(10800,true)&&c.state==2&&c.active==15);
-  assert(c.Request(0,3,0xffffff00u));assert(!c.Observe(0xffffff10u,true));assert(c.Observe(10u,true)&&c.active==0);
+  assert(c.Request(0,3,0xffffff00u));for(uint32_t i=0;i<250;i+=10)assert(!c.Observe(0xffffff10u+i,true));
+  assert(c.Observe(10u,true)&&c.active==0);
   assert(EmissionFloor(.09f,0)==.09f&&EmissionFloor(.09f,1)==.12f&&EmissionFloor(.2f,1)==.2f);
   Rearm r;assert(!r.Observe(100,false,100,260,0,.04f,15,0));
   assert(!r.Observe(300,false,300,260,0,.04f,15,0));
   assert(!r.Observe(350,false,350,260,.2f,.04f,15,0));
   assert(!r.Observe(400,false,400,260,0,.04f,15,0));
+  for(uint32_t t=410;t<460;t+=10)assert(!r.Observe(t,false,t,260,0,.04f,15,0));
   assert(r.Observe(460,false,460,260,0,.04f,15,0));
   assert(!r.Observe(461,false,461,260,0,.04f,15,.2f));
   float u[3]={.2f,0,sqrtf(.96f)},v[3]={0,0,1};

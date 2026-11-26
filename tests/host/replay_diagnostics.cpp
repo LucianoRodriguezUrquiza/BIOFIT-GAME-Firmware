@@ -21,12 +21,14 @@ int main(){
   assert(fabsf(fUp)<.02f);assert(count(3)==0);
   std::cout<<"PASS induced low-energy gyro bias corrected, no UP\n";
   boot();profile(2,1);autoRestEnabled=false;
-  det.upArmed=false;det.downSeen=false;det.lastUpMs=nowMs-1000;fUp=0;shortV=0;
-  for(int i=0;i<100;i++)sample(1.02f,15);
-  assert(det.upArmed);assert(count(3)==0);
+  det.upArmed=false;det.downSeen=false;det.lastUpMs=nowMs-1000;fUp=0;shortV=0;fGyro[1]=15;
+  diagnosticTrace.Start();for(int i=0;i<100;i++)sample(1.01f,15);diagnosticTrace.Freeze();
+  bool extra=false;for(uint16_t i=0;i<diagnosticTrace.count;++i){BiofitDiag::Sample v;assert(diagnosticTrace.Read(diagnosticTrace.generation,i,v));extra|=(v.events&32)!=0;}
+  assert(det.upArmed&&extra);assert(count(3)==0);
   std::cout<<"PASS supervised rearm on bounded valley without forced impulse\n";
   boot();profile(15,1);diagnosticTrace.Start();autoRestEnabled=false;
-  for(int j=0;j<100;j++)cycle();diagnosticTrace.Freeze();
+  for(int j=0;j<100;j++){cycle();}
+  diagnosticTrace.Freeze();
   BiofitDiag::Sample t;assert(diagnosticTrace.count==1024);assert(diagnosticTrace.Read(diagnosticTrace.generation,1023,t)&&t.mask==15&&t.ms==nowMs);
   assert(count(3)>0&&count(4)==0);std::cout<<"PASS combined prolonged replay and circular trace\n";
   rest(100);profile(0,2);events.clear();for(int j=0;j<30;j++)cycle();assert(count(4)>0&&count(3)>0);
