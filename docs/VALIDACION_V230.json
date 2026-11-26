@@ -1,0 +1,59 @@
+{
+  "version": "2.3.0 EXP",
+  "source_commit": "b924dc6418df4b609968e46becf5229971ddadb7",
+  "stable_main": "7afb20df8ace2b4c61153474649d31a36040dee1",
+  "workflow_run": 45912745315,
+  "jobs": [
+    {
+      "name": "compile (Izquierdo)",
+      "status": "in_progress",
+      "conclusion": null
+    },
+    {
+      "name": "compile (Derecho)",
+      "status": "in_progress",
+      "conclusion": null
+    },
+    {
+      "name": "source-contract",
+      "status": "completed",
+      "conclusion": "success"
+    }
+  ],
+  "previous_same_firmware_source_run": 45912654252,
+  "previous_jobs": [
+    {
+      "name": "source-contract",
+      "status": "completed",
+      "conclusion": "success"
+    },
+    {
+      "name": "compile (Derecho)",
+      "status": "in_progress",
+      "conclusion": null
+    },
+    {
+      "name": "compile (Izquierdo)",
+      "status": "in_progress",
+      "conclusion": null
+    }
+  ],
+  "host_equivalence": {
+    "samples": 33400,
+    "up": 40,
+    "lift": 46,
+    "mov_on": 40,
+    "mov_off": 39,
+    "fingerprint": "efc2d2092f5f0871",
+    "pass": true
+  },
+  "threshold_aligned_synthetic": {
+    "cycles": 100,
+    "up": 100,
+    "pass": true
+  },
+  "physical_validation": false,
+  "unity_config_client_implemented": false,
+  "esp32_builds_verified": false,
+  "limitations": "Host replay uses synthetic samples and mocks hardware transport; no independent physical, latency, NVS or installed binary verification. Check linked runs for status changes."
+}

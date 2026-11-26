@@ -50,3 +50,7 @@ La primera ejecución 45912598811 detectó una advertencia de indentación conve
 
 ### RCA: equivalencia de perfil 0
 Se añadió comparación de huella exacta de estados y eventos del processSample real de V2.2.9 (commit 7afb20d) con perfil 0 de V2.3.0. Secuencias deterministas con ruido, cadencia, cambios de configuración, reposo, huecos y rollover; no equivale a medición de CPU/BLE ni movimiento real. Se conserva el CI previo 45912654252 (host aprobado); repetir compilación y pruebas en el nuevo commit.
+
+### RCA: resultados de verificación
+Commit de código y pruebas `b924dc6418df4b609968e46becf5229971ddadb7`. [CI 45912745315](https://github.com/LucianoRodriguezUrquiza/BIOFIT-GAME-Firmware/actions/runs/45912745315): source-contract aprobado, incluida equivalencia exacta de 33.400 muestras (40 UP, 46 LIFT, 40 MOV_ON, 39 MOV_OFF, fingerprint efc2d2092f5f0871), 100/100 UP con piso alineado en replay sintético, deriva inducida, rearme supervisado, aislamiento TX, combinación y vuelta a 0. Compilaciones ESP32: todavía en ejecución al registrar este avance; consultar el enlace antes de cargar.
+El registro [VALIDACION_V230.json](VALIDACION_V230.json) es una instantánea de CI, no una certificación física. La interfaz Unity de control BLE queda pendiente; main conserva V2.2.9.
