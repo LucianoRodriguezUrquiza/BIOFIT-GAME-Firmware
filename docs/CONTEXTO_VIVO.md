@@ -1,3 +1,9 @@
+# V2.3.0 experimental — RCA
+
+Rama `feat/diagnostics-v230`, 26/11/2026. V2.2.9 sigue estable en main. Nuevo firmware: [protocolo y revisión](REVISION_V230_DIAGNOSTICO.md), perfiles RAM 0/1/2/4/8 combinables, trace de 1024 muestras; Unity aún sin interfaz de control. CI y ensayo físico pendientes al publicar. No se cambia el detector de Unity ni las físicas. Mantener evidencia y distinguir pruebas host de hardware.
+
+---
+
 # BIOFIT GAME — Firmware V2.2.9 / relevo técnico
 
 26/11/2026. V2.2.9 es la versión de referencia aprobada por el usuario para main. Código original: `274625f605ea92189abfb16275012f34ee14371f`; V2.2.5 obsoleta para uso activo, conservada en historial. Ver [consolidación y validación](CONSOLIDACION_V229.md), [revisión técnica](REVISION_V229_CICLO.md) y [README](../README.md).

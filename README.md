@@ -1,3 +1,9 @@
+# Universal Tracker V2.3.0 EXP — rama de diagnóstico
+
+26/11/2026: implementación experimental sobre V2.2.9 aprobada, main permanece V2.2.9. Perfiles RAM configurables por CONFIG BLE, trace circular congelable y descarga bajo demanda. Ver [contrato, límites y pruebas](docs/REVISION_V230_DIAGNOSTICO.md). No está validado físicamente; la UI Unity aún debe implementarse. El modo cero conserva LEGACY; no se modifica NVS. Consultar CI antes de grabar.
+
+---
+
 # BIOFIT GAME — Universal Tracker V2.2.9
 
 **Estado vigente (26/11/2026): V2.2.9, versión estable de trabajo aprobada por el usuario y autorizada para consolidación en main.** V2.2.5 queda obsoleta como referencia de trabajo; se conserva exclusivamente su historial y su uso como referencia de regresión. No se han modificado los sketches ni sus cabeceras respecto del código V2.2.9 publicado en `274625f605ea92189abfb16275012f34ee14371f`.

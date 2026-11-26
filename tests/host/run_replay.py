@@ -34,11 +34,12 @@ pre+=section('struct ImuSample {','// Prototipos explicitos para evitar')
 pre+=section('struct LiveData {','LiveData liveSnapshot();')+'\nLiveData live={};LiveData liveSnapshot(){return live;}void setLive(const LiveData &d){live=d;}\n'
 for n in ['length3','unit3','toI16']:pre+=function(n)+'\n'
 pre+=(sketch.parent/'BiofitLiftCycle.h').read_text().replace('#pragma once','')+'\n'
+pre+=(sketch.parent/'BiofitDiagnostic.h').read_text().replace('#pragma once','')+'\n'
 pre+=(sketch.parent/'BiofitPhaseEvidence.h').read_text().replace('#pragma once','')+'\n'
 pre+=section('struct MotionDetector {','// Los vectores de montaje se guardan')
 pre+=function('tryRestoreSavedAxisMap')+'\nvoid axisCaptureStep(const ImuSample&){}void finishTest(){activeTest=0;}void startTest(uint8_t,uint32_t){}\n'
 pre+=section('float fGyro[3]', 'TaskHandle_t imuTaskHandle')
-harness=Path(__file__).with_name('replay.cpp')
+harness=Path(__file__).with_name('replay_diagnostics.cpp' if '--diagnostics' in sys.argv else 'replay.cpp')
 if '--raw-input' in sys.argv:
  harness=Path(__file__).with_name('replay_raw.cpp')
  rawPath=sys.argv[sys.argv.index('--raw-input')+1]

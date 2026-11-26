@@ -33,7 +33,7 @@ for p in paths:
     assert now.count('phaseEvidence.Reset();') == 2  # CAL and auto-rest only
     assert 'pushEvent(3,ms,gyro,fUp,(uint8_t)(0x03 | (phaseReady ? 0x10 : 0x00)))' in now
     assert 'phaseEvidence.Observe(ms,fUp,gyro,fActivity,aNorm,gravityNorm)' in now
-    assert 'put16(q+18,229)' in now
+    assert 'put16(q+18,BiofitDiag::Version)' in now
     assert now.count('d.restCount=(uint16_t)min(')==2
     assert 's.us/1000UL' not in now and 's.us / 1000UL' not in now
     tx=now[now.index('void transportTask(void*) {'):]
@@ -45,3 +45,16 @@ for p in paths:
     packet=struct.pack('<BBBBHIhhH',2,1,3,0x81,65535,0xffffffff,250,120,1500)
     assert len(packet)==16 and struct.unpack_from('<H',packet,14)[0]==1500
 print('PASS: mirror identity, NVS/map/reanchor preservation, clock source, TX isolation and 16-byte protocol. Static checks only.')
+
+diagnostic_headers=sorted(root.glob('Firmware/**/BiofitDiagnostic.h'))
+assert len(diagnostic_headers)==2 and diagnostic_headers[0].read_bytes()==diagnostic_headers[1].read_bytes()
+for p in paths:
+    s=p.read_text()
+    assert 'BiofitDiag::Control diagnosticControl;' in s
+    assert 'BiofitDiag::Trace<1024>' in s
+    assert 'if(!(diagMask&BiofitDiag::IsolateLiftTx))' in s
+    assert 'diagnosticControl.Request(args[0],args[1],now)' in s
+    assert 'diagnosticTrace.Read(args[0],args[1],sample)' in s
+    cmd=s.split('void runDiagnosticCommand(',1)[1].split('void runCommand(',1)[0]
+    assert all(x not in cmd for x in ('prefs.', 'saveConfig(', 'setConfig(', 'requestCalibration=', 'pushEvent('))
+print('PASS: v230 mirrored diagnostics, RAM-only command and bounded trace contract')

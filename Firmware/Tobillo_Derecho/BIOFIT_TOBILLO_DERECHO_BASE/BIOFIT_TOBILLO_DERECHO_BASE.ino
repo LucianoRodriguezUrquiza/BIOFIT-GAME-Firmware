@@ -1,5 +1,5 @@
 /*
-  BIOFIT GAME | UNIVERSAL TRACKER v2.2.9 EXPERIMENTAL + SERIAL PLOTTER EJE_X/EJE_Y/EJE_Z
+  BIOFIT GAME | UNIVERSAL TRACKER v2.3.0 DIAGNOSTIC EXPERIMENTAL + SERIAL PLOTTER EJE_X/EJE_Y/EJE_Z
   Hardware: Waveshare ESP32-S3-LCD-1.47B (NO Touch), IMU QMI8658A.
   Arduino-ESP32 core 3.3.x; instalar "GFX Library for Arduino".
 
@@ -42,6 +42,7 @@
 #include <Preferences.h>
 #include "BiofitPhaseEvidence.h"
 #include "BiofitLiftCycle.h"
+#include "BiofitDiagnostic.h"
 
 // Modo plotter persistente. Evita mezclar texto de depuracion y graficas.
 // Se carga desde NVS en loadConfig(); puede cambiarse con PLOT,1 / PLOT,0.
@@ -465,6 +466,12 @@ struct MotionDetector {
 MotionDetector det;
 BiofitPhaseEvidence phaseEvidence; // legacy v228 flag unchanged
 BiofitLiftCycle liftCycle; // independent signed-history onset channel
+BiofitDiag::Control diagnosticControl;
+BiofitDiag::Rearm diagnosticRearm;
+BiofitDiag::Trace<1024> diagnosticTrace; // ~4.6 s at 224 Hz; frozen pull-only
+float diagnosticVertical[3]={0,0,1};
+uint32_t diagnosticRest=0;
+bool diagnosticVerticalValid=false;
 float gyroBias[3] = {0,0,0};
 float verticalUnit[3] = {0,0,1};
 float gravityNorm = 1.0f;
@@ -896,7 +903,9 @@ void calibrationSample(const ImuSample &s, uint32_t nowMs) {
 
 void processSample(const ImuSample &s, float dt) {
   const uint32_t ms = s.ms;
+  uint8_t diagMask;
   portENTER_CRITICAL(&dataMux);
+  diagMask=diagnosticControl.active;
   int8_t autoMode=pendingAutoRestMode; pendingAutoRestMode=-1;
   portEXIT_CRITICAL(&dataMux);
   if (autoMode>=0) {
@@ -908,6 +917,11 @@ void processSample(const ImuSample &s, float dt) {
     beginCalibration(ms);
   }
   if (calibrating) {
+    diagnosticVerticalValid=false;
+    diagnosticRearm.Reset();
+    portENTER_CRITICAL(&dataMux);
+    diagnosticControl.Observe(ms,false);
+    portEXIT_CRITICAL(&dataMux);
     calibrationSample(s, ms);
     LiveData d = liveSnapshot();
     d.ms = ms; d.flags = 0x80 | 0x08 | (calibrating ? 0x10 : 0x04) |
@@ -951,8 +965,31 @@ void processSample(const ImuSample &s, float dt) {
   rotateWorldVectorInSensor(verticalUnit,w,dt);
   if (axisReady) rotateWorldVectorInSensor(bodyXsensor,w,dt);
 
-  const float up = s.a[0]*verticalUnit[0] + s.a[1]*verticalUnit[1] +
+  const float legacyUp = s.a[0]*verticalUnit[0] + s.a[1]*verticalUnit[1] +
                    s.a[2]*verticalUnit[2] - gravityNorm;
+  // Profile switches occur at a low-energy stationary window, never mid-jump.
+  const bool profileQuiet=gyro<7.f && fActivity<.035f && fabsf(aNorm-gravityNorm)<.035f &&
+    fabsf(legacyUp)<.045f && fabsf(fUp)<.045f && fabsf(shortV)<.06f;
+  portENTER_CRITICAL(&dataMux);
+  const bool changed=diagnosticControl.Observe(ms,profileQuiet);
+  diagMask=diagnosticControl.active;
+  portEXIT_CRITICAL(&dataMux);
+  if(changed){
+    fUp=0;shortV=0;det.upEvidence=0;diagnosticRearm.Reset();
+    diagnosticVerticalValid=false;
+  }
+  const bool reanchor=!diagnosticVerticalValid || diagnosticRest!=autoRestCount;
+  if(reanchor || !(diagMask&BiofitDiag::AdaptiveGravity)){
+    for(int i=0;i<3;++i)diagnosticVertical[i]=verticalUnit[i];
+    diagnosticVerticalValid=true;diagnosticRest=autoRestCount;
+  } else {
+    rotateWorldVectorInSensor(diagnosticVertical,w,dt);
+  }
+  bool gravityCorrected=false;
+  if(diagMask&BiofitDiag::AdaptiveGravity)
+    gravityCorrected=BiofitDiag::CorrectVertical(diagnosticVertical,s.a,aNorm,gravityNorm,gyro,fActivity,dt);
+  const float adaptiveUp=s.a[0]*diagnosticVertical[0]+s.a[1]*diagnosticVertical[1]+s.a[2]*diagnosticVertical[2]-gravityNorm;
+  const float up=(diagMask&BiofitDiag::AdaptiveGravity)?adaptiveUp:legacyUp;
   fUp += alpha*(up-fUp);
   shortV = constrain(shortV*expf(-dt/0.40f) + fUp*G_MS2*dt,
                      -0.65f,0.65f);
@@ -1024,31 +1061,42 @@ void processSample(const ImuSample &s, float dt) {
   // remains unchanged. A positive acceleration alone is not upward velocity.
   phaseEvidence.Observe(ms,fUp,gyro,fActivity,aNorm,gravityNorm);
   // UP = candidato a impulso ascendente (no altura ni salto confirmado).
+  uint8_t diagEvents=gravityCorrected?8:0;
+  if(changed)diagEvents|=16;
+  bool extraRearm=false;
+  if(diagMask&BiofitDiag::SupervisedRearm)
+    extraRearm=diagnosticRearm.Observe(ms,det.upArmed,ms-det.lastUpMs,c.upGapMs,fUp,fActivity,gyro,shortV);
+  else diagnosticRearm.Reset();
   if (!det.upArmed) {
     if (fUp < -c.upOnG*0.55f) det.downSeen=true;
     if ((uint32_t)(ms-det.lastUpMs) >= c.upGapMs &&
-        (quiet || (det.downSeen && fUp < c.upOnG*0.35f))) {
+        (quiet || (det.downSeen && fUp < c.upOnG*0.35f) || extraRearm)) {
       det.upArmed = true; det.downSeen = false; det.upEvidence = 0; ++rearmCount;
+      diagEvents|=2; if(extraRearm && !quiet)diagEvents|=32; diagnosticRearm.Reset();
     }
   }
-  const bool upCandidate = fUp >= c.upOnG &&
+  const float emissionFloor=BiofitDiag::EmissionFloor(c.upOnG,diagMask);
+  const bool upCandidate = fUp >= emissionFloor &&
     fActivity >= c.upActG && shortV >= c.upVms;
   // Bitmask of current blockers; blockedSamples counts samples, NOT gestures.
-  upBlockReason=(fUp<c.upOnG?1:0)|(fActivity<c.upActG?2:0)|(shortV<c.upVms?4:0)|
+  upBlockReason=(fUp<emissionFloor?1:0)|(fActivity<c.upActG?2:0)|(shortV<c.upVms?4:0)|
     (!det.upArmed?8:0)|(!det.upArmed && (uint32_t)(ms-det.lastUpMs)<c.upGapMs?16:0);
   if(upCandidate && !det.upArmed) ++blockedUpSamples;
   if (det.upArmed) {
     det.upEvidence = upCandidate ? (uint8_t)min(3,(int)det.upEvidence+1) : 0;
     if (det.upEvidence >= 2) {
       det.upArmed=false; det.upEvidence=0; det.downSeen=false;
-      det.lastUpMs=ms; det.lastUpEventMs=ms; ++det.ups;
+      det.lastUpMs=ms; det.lastUpEventMs=ms; ++det.ups; diagEvents|=1;
       const bool phaseReady = phaseEvidence.OnUp(ms);
       pushEvent(3,ms,gyro,fUp,(uint8_t)(0x03 | (phaseReady ? 0x10 : 0x00)));
     }
   }
 
-  if (liftCycle.Observe(ms,fUp,gyro,fActivity,aNorm-gravityNorm))
-    pushEvent(4,ms,gyro,fUp-liftCycle.biasG,0x20); // V2/16 bytes: LIFT_ONSET, algorithm marker bit5
+  if (liftCycle.Observe(ms,fUp,gyro,fActivity,aNorm-gravityNorm)) {
+    diagEvents|=4;
+    if(!(diagMask&BiofitDiag::IsolateLiftTx))
+      pushEvent(4,ms,gyro,fUp-liftCycle.biasG,0x20); // V2/16 bytes: LIFT_ONSET, algorithm marker bit5
+  }
 
   const float scaledMotion = fmaxf(gyro/c.movOnDps, fActivity/c.movOnG);
   LiveData d = {};
@@ -1084,6 +1132,19 @@ void processSample(const ImuSample &s, float dt) {
   d.restRejected=(uint16_t)min(restRejectedWindows,(uint32_t)65535);
   d.upBlockReason=upBlockReason; d.autoEnabled=autoRestEnabled?1:0;
   setLive(d);
+  // Pull-only trace: bounded critical section, no BLE, Serial or NVS in capture.
+  portENTER_CRITICAL(&dataMux);
+  if(diagnosticTrace.state==1){
+    BiofitDiag::Sample t;
+    t.ms=ms;t.up=d.upMg;t.velocity=d.velocityMmS;t.activity=d.activityMg;t.gyro=d.gyroX10;
+    t.raw[0]=d.rawAxMg;t.raw[1]=d.rawAyMg;t.raw[2]=d.rawAzMg;
+    t.raw[3]=d.rawGxX10;t.raw[4]=d.rawGyX10;t.raw[5]=d.rawGzX10;
+    t.legacyUp=toI16(legacyUp*1000);t.adaptiveUp=toI16(adaptiveUp*1000);
+    t.dtUs=(uint16_t)constrain((int)lroundf(dt*1000000.f),0,65535);
+    t.flags=d.flags;t.block=d.upBlockReason;t.mask=diagMask;t.events=diagEvents;
+    diagnosticTrace.Push(t);
+  }
+  portEXIT_CRITICAL(&dataMux);
 }
 
 TaskHandle_t imuTaskHandle = nullptr;
@@ -1155,9 +1216,50 @@ String configValue(const RuntimeConfig &c, const String &key) {
   if (key=="UP_GAP_MS") return String(c.upGapMs);
   return "";
 }
+void runDiagnosticCommand(const String &command) {
+  uint16_t args[3]={};
+  if(command=="D,GET"){
+    uint8_t active,target,state;uint16_t token;
+    portENTER_CRITICAL(&dataMux);
+    active=diagnosticControl.active;target=diagnosticControl.target;state=diagnosticControl.state;token=diagnosticControl.token;
+    portEXIT_CRITICAL(&dataMux);
+    replyConfig("P,"+String(active)+","+String(target)+","+String(token)+","+String(state));return;
+  }
+  if(command.startsWith("D,P,")){
+    if(!BiofitDiag::ParseFields(command.c_str()+4,args,2)){replyConfig("ERR,D,FORMAT");return;}
+    uint32_t now=millis();
+    portENTER_CRITICAL(&dataMux);
+    bool ok=diagnosticControl.Request(args[0],args[1],now);
+    portEXIT_CRITICAL(&dataMux);
+    if(ok)replyConfig("D,Q,"+String(args[1]));else replyConfig("ERR,D,PROFILE");return;
+  }
+  if(command=="D,T,1"||command=="D,T,0"||command=="D,T"){
+    uint8_t state;uint16_t count,gen;
+    portENTER_CRITICAL(&dataMux);
+    if(command=="D,T,1")diagnosticTrace.Start();
+    if(command=="D,T,0")diagnosticTrace.Freeze();
+    state=diagnosticTrace.state;count=diagnosticTrace.count;gen=diagnosticTrace.generation;
+    portEXIT_CRITICAL(&dataMux);
+    replyConfig("T,"+String(state)+","+String(count)+","+String(gen));return;
+  }
+  if(command.startsWith("D,R,")){
+    if(!BiofitDiag::ParseFields(command.c_str()+4,args,3)||args[2]>2){replyConfig("ERR,D,FORMAT");return;}
+    BiofitDiag::Sample sample;
+    portENTER_CRITICAL(&dataMux);
+    bool ok=diagnosticTrace.Read(args[0],args[1],sample);
+    portEXIT_CRITICAL(&dataMux);
+    uint8_t bytes[20];
+    if(!ok||!BiofitDiag::Encode(sample,TRACKER_ID,args[0],args[1],(uint8_t)args[2],bytes)){replyConfig("ERR,D,TRACE");return;}
+    if(chrConfig){chrConfig->setValue(bytes,sizeof(bytes));if(bleConnected)chrConfig->notify();}
+    return;
+  }
+  replyConfig("ERR,D,CMD");
+}
+
 void runCommand(String command) {
   command.trim(); command.toUpperCase();
   if (command.length()==0) return;
+  if (command.startsWith("D,")) {runDiagnosticCommand(command);return;}
   if (command.startsWith("PLOT,RATE,")) {
     // 3 Hz=~16.7s, 5 Hz=~10s, 10 Hz=~5s, 25 Hz=~2s.
     const String arg=command.substring(10);
@@ -1323,7 +1425,7 @@ void drawStaticScreen() {
   lcd->setTextColor(C_WHITE); lcd->setTextSize(2);
   lcd->setCursor(10,5); lcd->print("BIOFIT GAME");
   lcd->setTextSize(1); lcd->setCursor(10,27);
-  lcd->print(TRACKER_LABEL); lcd->print("  v2.2.9 EXP");
+  lcd->print(TRACKER_LABEL); lcd->print("  v2.3.0 EXP");
   lcd->drawFastHLine(0,130,320,C_BLUE);
 }
 void drawDynamicScreen() {
@@ -1390,7 +1492,7 @@ void setup() {
   // ninguna linea de texto no numerico contamina las curvas.
   loadConfig();
   loadSavedAxisMap();
-  if (!serialPlotMode) Serial.printf("\nBIOFIT GAME v2.2.7 XYZ+PLOT | ID=%d | %s\n", TRACKER_ID, TRACKER_NAME);
+  if (!serialPlotMode) Serial.printf("\nBIOFIT GAME v2.3.0 XYZ+PLOT | ID=%d | %s\n", TRACKER_ID, TRACKER_NAME);
   if (!serialPlotMode) Serial.println("MOV es movimiento estimado. UP es candidato, NO altura/salto confirmado.");
 
   eventQueue=xQueueCreate(32,sizeof(EventPacket));
@@ -1549,7 +1651,7 @@ void transportTask(void*) {
     lastLiftDiag=now;
     uint8_t l[20]={3,TRACKER_ID,d.liftState,d.liftReason}; put32(l+4,d.ms);
     put16(l+8,(uint16_t)d.liftVelocityMmS); put16(l+10,(uint16_t)d.liftMinVelocityMmS);
-    put16(l+12,d.liftOnsets); put16(l+14,d.liftRearms); put16(l+16,d.liftFaults); put16(l+18,229);
+    put16(l+12,d.liftOnsets); put16(l+14,d.liftRearms); put16(l+16,d.liftFaults); put16(l+18,BiofitDiag::Version);
     chrTransport->setValue(l,sizeof(l)); timedNotify(chrTransport);
   }
   if (connected && (uint32_t)(now-lastTransport)>=1000) {
@@ -1580,7 +1682,7 @@ void transportTask(void*) {
       put16(q+16,c.releaseMs); put16(q+18,AUTO_REST_MS);
     } else {
       put16(q+8,d.rearms); put16(q+10,d.upBlockReason); put16(q+12,d.blockedSamples);
-      put16(q+14,d.calSamples); put16(q+16,d.restRejected); put16(q+18,229);
+      put16(q+14,d.calSamples); put16(q+16,d.restRejected); put16(q+18,BiofitDiag::Version);
     }
     chrTransport->setValue(q,sizeof(q)); timedNotify(chrTransport);
     page=page==3?1:page+1;
