@@ -38,5 +38,14 @@ int main(){
   uint8_t packet[20];assert(Encode(s,1,gen,3,0,packet)&&packet[0]==0xD3&&packet[8]==9&&packet[12]==0x85&&packet[13]==0xff);
   assert(Encode(s,2,gen,3,1,packet)&&packet[18]==0xd4&&packet[19]==0xfe);
   assert(!Encode(s,1,gen,3,3,packet));tr.Start();assert(!tr.Read(gen,0,s));
+  Sample extended[8];Trace<4> flex;flex.Attach(extended,8);assert(!flex.Start(9));assert(flex.Start(8));
+  for(unsigned i=0;i<12;i++){s.ms=i;flex.Push(s);}
+  assert(!flex.Start(4));flex.Freeze();assert(flex.count==8&&flex.Read(flex.generation,0,s)&&s.ms==4);
+  assert(flex.Start()&&flex.capacity==4);flex.Freeze();assert(flex.count==0);
+  assert(TraceCapacity(60)==13452&&TraceCapacity(10)==0);
+  const uint8_t known[]={'1','2','3','4','5','6','7','8','9'};
+  assert((CrcUpdate(0xffffffffu,known,9)^0xffffffffu)==0xcbf43926u);
+  EncodeBlockEnd(2,0x1234,0x5678,16,0xcbf43926u,packet);
+  assert(packet[0]==0xd4&&packet[1]==2&&packet[2]==16&&packet[4]==0x34&&packet[7]==0x56&&packet[8]==0x26&&packet[11]==0xcb);
   std::puts("PASS: profile grammar, idempotency, transition timeout/rollover, supervised rearm, bounded correction, ring and packet encoding");
 }

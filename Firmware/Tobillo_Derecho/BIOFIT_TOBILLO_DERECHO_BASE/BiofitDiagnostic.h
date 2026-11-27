@@ -6,7 +6,7 @@
 // Experimental RAM-only options. Zero preserves v229 control and event format.
 namespace BiofitDiag {
 enum : uint8_t { AlignThreshold=1, SupervisedRearm=2, AdaptiveGravity=4, IsolateLiftTx=8, All=15 };
-constexpr uint16_t Version=230;
+constexpr uint16_t Version=231;
 constexpr uint32_t SettleMs=250, RequestTimeoutMs=10000;
 inline bool ValidMask(uint32_t mask) { return mask<=All; }
 inline float EmissionFloor(float configured,uint8_t mask) {
@@ -98,14 +98,22 @@ struct Sample {
 template<uint16_t N> struct Trace {
   static_assert(N>0,"trace capacity");
   Sample samples[N]={};
-  uint16_t head=0,count=0,generation=0;
+  uint16_t head=0,count=0,generation=0,capacity=N,externalCapacity=0;
+  Sample* external=nullptr; // assigned once before acquisition; caller owns storage
   uint8_t state=0; // 0 empty, 1 recording, 2 frozen
-  void Start(){if(state==1)return;head=count=0;if(++generation==0)++generation;state=1;}
+  void Attach(Sample* p,uint16_t n){if(state==0&&p&&n>N){external=p;externalCapacity=n;}}
+  Sample* Data(){return capacity>N?external:samples;}
+  const Sample* Data()const{return capacity>N?external:samples;}
+  bool Start(uint16_t requested=N){
+    if(requested==0||(requested>N&&(!external||requested>externalCapacity)))return false;
+    if(state==1)return requested==capacity; // retry is idempotent
+    capacity=requested;head=count=0;if(++generation==0)++generation;state=1;return true;
+  }
   void Freeze(){if(state==1)state=2;}
-  void Push(const Sample& s){if(state!=1)return;samples[head]=s;head=(head+1u)%N;if(count<N)++count;}
+  void Push(const Sample& s){if(state!=1)return;Data()[head]=s;head=(head+1u)%capacity;if(count<capacity)++count;}
   bool Read(uint16_t gen,uint16_t index,Sample& out)const {
     if(state!=2||gen!=generation||index>=count)return false;
-    out=samples[(uint32_t(head)+N-count+index)%N];return true;
+    out=Data()[(uint32_t(head)+capacity-count+index)%capacity];return true;
   }
 };
 inline void Put16(uint8_t* p,uint16_t v){p[0]=uint8_t(v);p[1]=uint8_t(v>>8);}
@@ -118,5 +126,18 @@ inline bool Encode(const Sample& s,uint8_t id,uint16_t gen,uint16_t index,uint8_
   if(page==1)for(unsigned i=0;i<6;++i)Put16(out+8+2*i,s.raw[i]);
   if(page==2){out[8]=s.flags;out[9]=s.block;out[10]=s.mask;out[11]=s.events;Put16(out+12,s.legacyUp);Put16(out+14,s.adaptiveUp);Put16(out+16,s.dtUs);}
   return true;
+}
+constexpr uint16_t MaxTrace=13452;
+constexpr uint8_t MaxBlock=16;
+inline uint16_t TraceCapacity(uint16_t seconds){
+  return seconds==5?1121:seconds==15?3363:seconds==30?6726:seconds==60?MaxTrace:0;
+}
+inline uint32_t CrcUpdate(uint32_t crc,const uint8_t* p,size_t n){
+  while(n--){crc^=*p++;for(unsigned b=0;b<8;++b)crc=(crc>>1)^(0xedb88320u&uint32_t(0u-(crc&1u)));}
+  return crc;
+}
+inline void EncodeBlockEnd(uint8_t id,uint16_t gen,uint16_t start,uint8_t count,uint32_t crc,uint8_t out[20]){
+  for(unsigned i=0;i<20;++i)out[i]=0;
+  out[0]=0xD4;out[1]=id;out[2]=count;out[3]=1;Put16(out+4,gen);Put16(out+6,start);Put32(out+8,crc);
 }
 } // namespace BiofitDiag

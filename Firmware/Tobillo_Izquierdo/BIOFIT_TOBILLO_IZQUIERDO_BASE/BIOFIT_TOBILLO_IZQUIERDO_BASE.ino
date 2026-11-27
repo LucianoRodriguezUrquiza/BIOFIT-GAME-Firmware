@@ -1,5 +1,5 @@
 /*
-  BIOFIT GAME | UNIVERSAL TRACKER v2.3.0 DIAGNOSTIC EXPERIMENTAL + SERIAL PLOTTER EJE_X/EJE_Y/EJE_Z
+  BIOFIT GAME | UNIVERSAL TRACKER v2.3.1 DIAGNOSTIC EXPERIMENTAL + SERIAL PLOTTER EJE_X/EJE_Y/EJE_Z
   Hardware: Waveshare ESP32-S3-LCD-1.47B (NO Touch), IMU QMI8658A.
   Arduino-ESP32 core 3.3.x; instalar "GFX Library for Arduino".
 
@@ -34,6 +34,8 @@
 #include <Wire.h>
 #include <math.h>
 #include <stdlib.h>
+#include <new>
+#include <esp_heap_caps.h>
 #include <Arduino_GFX_Library.h>
 #include <BLEDevice.h>
 #include <BLEServer.h>
@@ -1216,6 +1218,30 @@ String configValue(const RuntimeConfig &c, const String &key) {
   if (key=="UP_GAP_MS") return String(c.upGapMs);
   return "";
 }
+// CONFIG block transfer is serviced in loop, never from processSample or BLE callback.
+struct TraceBlockTx { uint16_t gen=0,start=0;uint8_t count=0,next=0;uint32_t crc=0xffffffffu,last=0;bool active=false; };
+TraceBlockTx traceTx;
+void pumpTraceBlock(uint32_t now) {
+  if(!bleConnected){traceTx.active=false;return;}
+  if(!traceTx.active||uint32_t(now-traceTx.last)<6u)return;
+  traceTx.last=now;
+  uint8_t bytes[20];
+  if(traceTx.next==traceTx.count*3u){
+    BiofitDiag::EncodeBlockEnd(TRACKER_ID,traceTx.gen,traceTx.start,traceTx.count,traceTx.crc^0xffffffffu,bytes);
+    traceTx.active=false;
+  }else{
+    uint16_t index=traceTx.start+traceTx.next/3u;uint8_t page=traceTx.next%3u;
+    BiofitDiag::Sample sample;
+    portENTER_CRITICAL(&dataMux);
+    bool ok=diagnosticTrace.Read(traceTx.gen,index,sample);
+    portEXIT_CRITICAL(&dataMux);
+    if(!ok||!BiofitDiag::Encode(sample,TRACKER_ID,traceTx.gen,index,page,bytes)){
+      traceTx.active=false;replyConfig("ERR,D,TRACE");return;
+    }
+    traceTx.crc=BiofitDiag::CrcUpdate(traceTx.crc,bytes,20);++traceTx.next;
+  }
+  if(chrConfig){chrConfig->setValue(bytes,sizeof(bytes));chrConfig->notify();}
+}
 void runDiagnosticCommand(const String &command) {
   uint16_t args[3]={};
   if(command=="D,GET"){
@@ -1233,13 +1259,35 @@ void runDiagnosticCommand(const String &command) {
     portEXIT_CRITICAL(&dataMux);
     if(ok)replyConfig("D,Q,"+String(args[1]));else replyConfig("ERR,D,PROFILE");return;
   }
+  if(command.startsWith("D,B,")){
+    if(!BiofitDiag::ParseFields(command.c_str()+4,args,3)||args[2]<1||args[2]>BiofitDiag::MaxBlock){replyConfig("ERR,D,FORMAT");return;}
+    portENTER_CRITICAL(&dataMux);
+    bool ok=diagnosticTrace.state==2&&args[0]==diagnosticTrace.generation&&uint32_t(args[1])+args[2]<=diagnosticTrace.count;
+    portEXIT_CRITICAL(&dataMux);
+    if(!ok){replyConfig("ERR,D,TRACE");return;}
+    traceTx=TraceBlockTx{};traceTx.gen=args[0];traceTx.start=args[1];traceTx.count=uint8_t(args[2]);traceTx.active=true;return;
+  }
+  if(command=="D,C"){traceTx.active=false;replyConfig("D,C");return;}
+  if(command.startsWith("D,S,")){
+    if(!BiofitDiag::ParseFields(command.c_str()+4,args,1)){replyConfig("ERR,D,FORMAT");return;}
+    const uint16_t n=BiofitDiag::TraceCapacity(args[0]);
+    uint8_t state;uint16_t count,gen;
+    portENTER_CRITICAL(&dataMux);
+    bool ok=diagnosticTrace.Start(n);
+    state=diagnosticTrace.state;count=diagnosticTrace.count;gen=diagnosticTrace.generation;
+    portEXIT_CRITICAL(&dataMux);
+    if(!ok){replyConfig("ERR,D,CAPACITY");return;}
+    traceTx.active=false;replyConfig("T,"+String(state)+","+String(count)+","+String(gen));return;
+  }
   if(command=="D,T,1"||command=="D,T,0"||command=="D,T"){
     uint8_t state;uint16_t count,gen;
     portENTER_CRITICAL(&dataMux);
-    if(command=="D,T,1")diagnosticTrace.Start();
+    bool started=command!="D,T,1"||diagnosticTrace.Start();
     if(command=="D,T,0")diagnosticTrace.Freeze();
     state=diagnosticTrace.state;count=diagnosticTrace.count;gen=diagnosticTrace.generation;
     portEXIT_CRITICAL(&dataMux);
+    if(!started){replyConfig("ERR,D,CAPACITY");return;}
+    if(command=="D,T,1")traceTx.active=false;
     replyConfig("T,"+String(state)+","+String(count)+","+String(gen));return;
   }
   if(command.startsWith("D,R,")){
@@ -1492,7 +1540,7 @@ void setup() {
   // ninguna linea de texto no numerico contamina las curvas.
   loadConfig();
   loadSavedAxisMap();
-  if (!serialPlotMode) Serial.printf("\nBIOFIT GAME v2.3.0 XYZ+PLOT | ID=%d | %s\n", TRACKER_ID, TRACKER_NAME);
+  if (!serialPlotMode) Serial.printf("\nBIOFIT GAME v2.3.1 XYZ+PLOT | ID=%d | %s\n", TRACKER_ID, TRACKER_NAME);
   if (!serialPlotMode) Serial.println("MOV es movimiento estimado. UP es candidato, NO altura/salto confirmado.");
 
   eventQueue=xQueueCreate(32,sizeof(EventPacket));
@@ -1518,6 +1566,13 @@ void setup() {
   }
   imuOk=true;
   if (!serialPlotMode) Serial.printf("QMI8658: 0x%02X, ODR nominal 224.2Hz, +/-8g, +/-512dps\n",imuAddr);
+  // Allocate optional extended ring before the real-time task starts.
+  void* traceMemory=heap_caps_malloc(sizeof(BiofitDiag::Sample)*BiofitDiag::MaxTrace,MALLOC_CAP_SPIRAM|MALLOC_CAP_8BIT);
+  if(traceMemory){
+    auto* extended=static_cast<BiofitDiag::Sample*>(traceMemory);
+    for(uint16_t i=0;i<BiofitDiag::MaxTrace;++i)new(extended+i) BiofitDiag::Sample();
+    diagnosticTrace.Attach(extended,BiofitDiag::MaxTrace);
+  }
   startBLE();
   xTaskCreatePinnedToCore(imuTask,"BIOFIT_IMU",8192,nullptr,5,&imuTaskHandle,1);
   if (xTaskCreatePinnedToCore(transportTask,"BIOFIT_BLE_TX",6144,nullptr,2,nullptr,1)!=pdPASS) {
@@ -1555,6 +1610,7 @@ void loop() {
     else serialPos=0;
   }
   const uint32_t now=millis();
+  pumpTraceBlock(now);
   // No escritura Serial desde la IMU al usar PLOT; graficar desde loop.
   // Antes de AXIS OK, no rotulamos datos crudos como anatomicos:
   // las tres lineas permanecen en cero hasta calibrar la transformacion.
