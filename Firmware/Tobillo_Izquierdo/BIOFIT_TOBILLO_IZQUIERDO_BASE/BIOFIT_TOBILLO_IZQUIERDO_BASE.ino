@@ -1226,7 +1226,8 @@ String configValue(const RuntimeConfig &c, const String &key) {
 struct TraceBlockTx { uint16_t gen=0,start=0;uint8_t count=0,next=0;uint32_t crc=0xffffffffu,last=0;bool active=false; };
 TraceBlockTx traceTx;
 void pumpTraceBlock(uint32_t now) {
-  if(!bleConnected){traceTx.active=false;return;}
+  // No diagnostic transfer may compete with automatic acquisition.
+  if(!bleConnected||autoTrace.armed){traceTx.active=false;return;}
   if(!traceTx.active||uint32_t(now-traceTx.last)<6u)return;
   traceTx.last=now;
   uint8_t bytes[20];
