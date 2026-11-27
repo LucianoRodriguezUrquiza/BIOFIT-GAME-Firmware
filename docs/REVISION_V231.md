@@ -7,3 +7,8 @@ Base V230 0b651c1. No cambios en processSample, eventos EVENT, NVS, calibración
 - STEP/WALK/RUN: conservar canal universal y roles 1–4; detector definitivo pospuesto hasta señales de tobillos. Mantener LEGACY intacto.
 ## Verificación
 Pruebas host de ring extendido, CRC conocido, encabezado D4; CI incluye compilación ambas placas y replay exacto perfil0 contra 229. Validación Android/PSRAM/throughput real pendiente.
+
+## RCA y puesta en servicio
+- Se cancela cualquier transmisión pendiente cuando se arma GFA. No se transfieren muestras durante el juego; los marcadores no modifican el detector. Mantener compatibilidad FW230 y canal EVENT; futura locomoción se implementará con señales de tobillos y consumidor independiente.
+- En Arduino IDE usar core ESP32 3.3.5, GFX 1.6.9, ESP32S3 Dev Module, 16 MB flash QIO 80 MHz, OPI PSRAM, USB CDC On Boot enabled, Hardware CDC and JTAG, 240 MHz, partición 16M Flash (3MB APP/9.9MB FATFS), Erase All Flash disabled, carga 921600. Comprobar montaje y PSRAM antes de aumentar duración. No borrar NVS ni recalibrar como parte de esta instalación.
+- CI de la revisión que incorpora banco GFA da2a859: [46025319653](https://github.com/LucianoRodriguezUrquiza/BIOFIT-GAME-Firmware/actions/runs/46025319653), 3/3. Revisión de exclusión TX: [46026170410](https://github.com/LucianoRodriguezUrquiza/BIOFIT-GAME-Firmware/actions/runs/46026170410). Medición física pendiente. Rama main FW229 no se promueve ni modifica.

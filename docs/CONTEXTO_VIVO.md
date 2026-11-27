@@ -1,3 +1,9 @@
+# V2.3.1 experimental — BMD 1.1 / GFA
+
+Rama feat/diagnostics-v231. [Contrato de bloques, PSRAM, GFA, instalación y verificación](REVISION_V231.md). No cambia detección ni calibración. Firmware común para DASH y futuros juegos; locomoción validada pendiente. Main permanece V2.2.9.
+
+---
+
 # V2.3.0 experimental — RCA
 
 Rama `feat/diagnostics-v230`, 26/11/2026. V2.2.9 sigue estable en main. Nuevo firmware: [protocolo y revisión](REVISION_V230_DIAGNOSTICO.md), perfiles RAM 0/1/2/4/8 combinables, trace de 1024 muestras; Unity aún sin interfaz de control. CI y ensayo físico pendientes al publicar. No se cambia el detector de Unity ni las físicas. Mantener evidencia y distinguir pruebas host de hardware.
