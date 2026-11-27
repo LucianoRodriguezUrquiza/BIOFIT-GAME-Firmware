@@ -107,7 +107,7 @@ template<uint16_t N> struct Trace {
   bool Start(uint16_t requested=N){
     if(requested==0||(requested>N&&(!external||requested>externalCapacity)))return false;
     if(state==1)return requested==capacity; // retry is idempotent
-    capacity=requested;head=count=0;if(++generation==0)++generation;state=1;return true;
+    capacity=requested;head=count=0;if(++generation>=0x8000u)generation=1;state=1;return true;
   }
   void Freeze(){if(state==1)state=2;}
   void Push(const Sample& s){if(state!=1)return;Data()[head]=s;head=(head+1u)%capacity;if(count<capacity)++count;}
@@ -139,5 +139,113 @@ inline uint32_t CrcUpdate(uint32_t crc,const uint8_t* p,size_t n){
 inline void EncodeBlockEnd(uint8_t id,uint16_t gen,uint16_t start,uint8_t count,uint32_t crc,uint8_t out[20]){
   for(unsigned i=0;i<20;++i)out[i]=0;
   out[0]=0xD4;out[1]=id;out[2]=count;out[3]=1;Put16(out+4,gen);Put16(out+6,start);Put32(out+8,crc);
+}
+// Event-triggered bank. History stays live; each failure gets its own immutable
+// snapshot. Step() copies at most ONE history sample per call under caller lock.
+// Sensor timestamps use signed modular differences (windows << 2^31 ms).
+constexpr uint16_t AutoHistory=2048, AutoWindow=1024;
+constexpr uint8_t AutoSlots=16;
+constexpr uint32_t AutoStorage=uint32_t(AutoHistory)+uint32_t(AutoWindow)*AutoSlots;
+struct Snapshot {
+  uint16_t id=0,gen=0,count=0;
+  uint32_t target=0,received=0,cursor=0,end=0;
+  uint8_t state=0,flags=0; // 1 wait post, 2 copy, 3 ready, 4 empty
+};
+struct AutoBank {
+  Sample* memory=nullptr;
+  Snapshot slots[AutoSlots]={};
+  uint32_t total=0;
+  uint16_t historyCount=0,session=0,nextGen=0x8000u;
+  uint8_t used=0;
+  bool armed=false;
+  void Attach(Sample* p){if(!armed&&p)memory=p;}
+  bool Pending()const{for(uint8_t i=0;i<used;++i)if(slots[i].state==1||slots[i].state==2)return true;return false;}
+  bool Begin(uint16_t token){
+    if(!memory||token==0)return false;
+    if(session==token)return armed; // duplicate does not erase finished captures
+    if(armed||Pending())return false;
+    session=token;used=0;total=0;historyCount=0;armed=true;return true;
+  }
+  void Stop(){armed=false;}
+  void Push(const Sample& s){
+    if(!armed)return;
+    memory[total%AutoHistory]=s;++total;if(historyCount<AutoHistory)++historyCount;
+  }
+  int Mark(uint16_t id,uint32_t target,uint32_t received){
+    if(!id||!memory)return -1;
+    for(uint8_t i=0;i<used;++i)if(slots[i].id==id)return slots[i].target==target?i:-1;
+    int32_t delay=int32_t(received-target);
+    if(!armed||used>=AutoSlots||delay< -250||delay>5000)return -1;
+    auto& v=slots[used];v=Snapshot{};
+    v.id=id;v.target=target;v.received=received;v.state=1;
+    if(++nextGen<0x8000u)nextGen=0x8001u;
+    v.gen=nextGen;
+    return used++;
+  }
+  Sample* Window(uint8_t index){return memory+AutoHistory+uint32_t(index)*AutoWindow;}
+  const Sample* Window(uint8_t index)const{return memory+AutoHistory+uint32_t(index)*AutoWindow;}
+  void Finish(uint8_t index){
+    auto& v=slots[index];
+    if(!v.count){v.flags|=3;v.state=4;return;}
+    const Sample* w=Window(index);
+    if(int32_t(w[0].ms-(v.target-3000u))>20)v.flags|=1;
+    if(int32_t((v.target+1000u)-w[v.count-1].ms)>20)v.flags|=2;
+    v.state=3;
+  }
+  bool Step(){
+    if(!memory)return false;
+    for(uint8_t i=0;i<used;++i){
+      auto& v=slots[i];
+      if(v.state==1){
+        if(!historyCount){if(armed)continue;Finish(i);return true;}
+        uint32_t newest=memory[(total-1u)%AutoHistory].ms;
+        if(armed&&int32_t(newest-(v.target+1000u))<0)continue;
+        v.cursor=total-historyCount;v.end=total;v.state=2;
+      }
+      if(v.state!=2)continue;
+      if(v.cursor==v.end){Finish(i);return true;}
+      if(uint32_t(total-v.cursor)>historyCount){
+        v.flags|=4;v.cursor=total-historyCount;
+        if(int32_t(v.cursor-v.end)>=0){Finish(i);return true;}
+      }
+      const Sample s=memory[v.cursor%AutoHistory];++v.cursor;
+      if(int32_t(s.ms-(v.target+1000u))>0){Finish(i);return true;}
+      if(int32_t(s.ms-(v.target-3000u))>=0){
+        if(v.count>=AutoWindow){v.flags|=8;Finish(i);return true;}
+        auto* w=Window(i);
+        if(v.count&&uint32_t(s.ms-w[v.count-1].ms)>20u)v.flags|=16;
+        w[v.count++]=s;
+      }
+      if(v.cursor==v.end)Finish(i);
+      return true;
+    }
+    return false;
+  }
+  bool Range(uint16_t gen,uint16_t start,uint16_t n)const{
+    if(armed||!memory)return false; // no transfer during auto acquisition
+    for(uint8_t i=0;i<used;++i)if(slots[i].state==3&&slots[i].gen==gen)
+      return n>0&&uint32_t(start)+n<=slots[i].count;
+    return false;
+  }
+  bool Read(uint16_t gen,uint16_t index,Sample& s)const{
+    if(!Range(gen,index,1))return false;
+    for(uint8_t i=0;i<used;++i)if(slots[i].gen==gen){s=Window(i)[index];return true;}
+    return false;
+  }
+};
+inline bool ParseMarker(const char* s,uint16_t& id,uint32_t& target){
+  uint32_t first=0,second=0;
+  if(*s<'0'||*s>'9')return false;
+  do{first=first*10u+uint32_t(*s-'0');if(first>65535u)return false;++s;}while(*s>='0'&&*s<='9');
+  if(*s++!=','||*s<'0'||*s>'9')return false;
+  do{uint32_t digit=uint32_t(*s-'0');if(second>(0xffffffffu-digit)/10u)return false;second=second*10u+digit;++s;}while(*s>='0'&&*s<='9');
+  if(*s||!first)return false;
+  id=uint16_t(first);target=second;return true;
+}
+inline void EncodeSnapshot(uint8_t foot,uint8_t index,const Snapshot& v,uint8_t out[20]){
+  for(unsigned i=0;i<20;++i)out[i]=0;
+  out[0]=0xD5;out[1]=foot;out[2]=index;out[3]=v.state;
+  Put16(out+4,v.gen);Put16(out+6,v.id);Put32(out+8,v.target);Put32(out+12,v.received);
+  Put16(out+16,v.count);out[18]=v.flags;
 }
 } // namespace BiofitDiag

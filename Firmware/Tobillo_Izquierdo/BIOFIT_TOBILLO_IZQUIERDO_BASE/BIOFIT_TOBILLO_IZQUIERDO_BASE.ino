@@ -36,6 +36,7 @@
 #include <stdlib.h>
 #include <new>
 #include <esp_heap_caps.h>
+#include <esp_random.h>
 #include <Arduino_GFX_Library.h>
 #include <BLEDevice.h>
 #include <BLEServer.h>
@@ -471,6 +472,8 @@ BiofitLiftCycle liftCycle; // independent signed-history onset channel
 BiofitDiag::Control diagnosticControl;
 BiofitDiag::Rearm diagnosticRearm;
 BiofitDiag::Trace<1024> diagnosticTrace; // ~4.6 s at 224 Hz; frozen pull-only
+BiofitDiag::AutoBank autoTrace; // optional PSRAM; no allocation in acquisition
+uint32_t diagnosticBoot=0;
 float diagnosticVertical[3]={0,0,1};
 uint32_t diagnosticRest=0;
 bool diagnosticVerticalValid=false;
@@ -1136,7 +1139,7 @@ void processSample(const ImuSample &s, float dt) {
   setLive(d);
   // Pull-only trace: bounded critical section, no BLE, Serial or NVS in capture.
   portENTER_CRITICAL(&dataMux);
-  if(diagnosticTrace.state==1){
+  if(diagnosticTrace.state==1||autoTrace.armed){
     BiofitDiag::Sample t;
     t.ms=ms;t.up=d.upMg;t.velocity=d.velocityMmS;t.activity=d.activityMg;t.gyro=d.gyroX10;
     t.raw[0]=d.rawAxMg;t.raw[1]=d.rawAyMg;t.raw[2]=d.rawAzMg;
@@ -1145,6 +1148,7 @@ void processSample(const ImuSample &s, float dt) {
     t.dtUs=(uint16_t)constrain((int)lroundf(dt*1000000.f),0,65535);
     t.flags=d.flags;t.block=d.upBlockReason;t.mask=diagMask;t.events=diagEvents;
     diagnosticTrace.Push(t);
+    autoTrace.Push(t);
   }
   portEXIT_CRITICAL(&dataMux);
 }
@@ -1233,7 +1237,7 @@ void pumpTraceBlock(uint32_t now) {
     uint16_t index=traceTx.start+traceTx.next/3u;uint8_t page=traceTx.next%3u;
     BiofitDiag::Sample sample;
     portENTER_CRITICAL(&dataMux);
-    bool ok=diagnosticTrace.Read(traceTx.gen,index,sample);
+    bool ok=traceTx.gen>=0x8000u?autoTrace.Read(traceTx.gen,index,sample):diagnosticTrace.Read(traceTx.gen,index,sample);
     portEXIT_CRITICAL(&dataMux);
     if(!ok||!BiofitDiag::Encode(sample,TRACKER_ID,traceTx.gen,index,page,bytes)){
       traceTx.active=false;replyConfig("ERR,D,TRACE");return;
@@ -1259,10 +1263,48 @@ void runDiagnosticCommand(const String &command) {
     portEXIT_CRITICAL(&dataMux);
     if(ok)replyConfig("D,Q,"+String(args[1]));else replyConfig("ERR,D,PROFILE");return;
   }
+  if(command=="D,N"){replyConfig("N,"+String(diagnosticBoot));return;}
+  if(command=="D,A"||command.startsWith("D,A,")){
+    const bool change=command!="D,A";
+    if(change&&!BiofitDiag::ParseFields(command.c_str()+4,args,1)){replyConfig("ERR,D,FORMAT");return;}
+    portENTER_CRITICAL(&dataMux);
+    bool ok=true;
+    if(change){
+      if(args[0]==0)autoTrace.Stop();
+      else ok=diagnosticTrace.state!=1&&!streamRaw&&autoTrace.Begin(args[0]);
+    }
+    uint16_t session=autoTrace.session;uint8_t used=autoTrace.used;bool armed=autoTrace.armed;
+    portEXIT_CRITICAL(&dataMux);
+    if(!ok){replyConfig("ERR,D,AUTO");return;}
+    replyConfig("A,"+String(session)+","+String(used)+","+String(armed?1:0));return;
+  }
+  if(command.startsWith("D,M,")){
+    uint16_t id;uint32_t target;
+    if(!BiofitDiag::ParseMarker(command.c_str()+4,id,target)){replyConfig("ERR,D,FORMAT");return;}
+    uint32_t now=millis();
+    portENTER_CRITICAL(&dataMux);
+    int slot=autoTrace.Mark(id,target,now);
+    portEXIT_CRITICAL(&dataMux);
+    if(slot<0){replyConfig("ERR,D,MARK");return;}
+    replyConfig("M,"+String(id)+","+String(slot));return;
+  }
+  if(command.startsWith("D,I,")){
+    if(!BiofitDiag::ParseFields(command.c_str()+4,args,1)||args[0]>=BiofitDiag::AutoSlots){replyConfig("ERR,D,FORMAT");return;}
+    BiofitDiag::Snapshot info;
+    portENTER_CRITICAL(&dataMux);
+    bool ok=args[0]<autoTrace.used;
+    if(ok)info=autoTrace.slots[args[0]];
+    portEXIT_CRITICAL(&dataMux);
+    if(!ok){replyConfig("ERR,D,INDEX");return;}
+    uint8_t bytes[20];BiofitDiag::EncodeSnapshot(TRACKER_ID,uint8_t(args[0]),info,bytes);
+    if(chrConfig){chrConfig->setValue(bytes,sizeof(bytes));if(bleConnected)chrConfig->notify();}
+    return;
+  }
   if(command.startsWith("D,B,")){
     if(!BiofitDiag::ParseFields(command.c_str()+4,args,3)||args[2]<1||args[2]>BiofitDiag::MaxBlock){replyConfig("ERR,D,FORMAT");return;}
     portENTER_CRITICAL(&dataMux);
-    bool ok=diagnosticTrace.state==2&&args[0]==diagnosticTrace.generation&&uint32_t(args[1])+args[2]<=diagnosticTrace.count;
+    bool ok=!autoTrace.armed&&(args[0]>=0x8000u?autoTrace.Range(args[0],args[1],args[2]):
+      diagnosticTrace.state==2&&args[0]==diagnosticTrace.generation&&uint32_t(args[1])+args[2]<=diagnosticTrace.count);
     portEXIT_CRITICAL(&dataMux);
     if(!ok){replyConfig("ERR,D,TRACE");return;}
     traceTx=TraceBlockTx{};traceTx.gen=args[0];traceTx.start=args[1];traceTx.count=uint8_t(args[2]);traceTx.active=true;return;
@@ -1273,7 +1315,7 @@ void runDiagnosticCommand(const String &command) {
     const uint16_t n=BiofitDiag::TraceCapacity(args[0]);
     uint8_t state;uint16_t count,gen;
     portENTER_CRITICAL(&dataMux);
-    bool ok=diagnosticTrace.Start(n);
+    bool ok=!autoTrace.armed&&diagnosticTrace.Start(n);
     state=diagnosticTrace.state;count=diagnosticTrace.count;gen=diagnosticTrace.generation;
     portEXIT_CRITICAL(&dataMux);
     if(!ok){replyConfig("ERR,D,CAPACITY");return;}
@@ -1282,7 +1324,7 @@ void runDiagnosticCommand(const String &command) {
   if(command=="D,T,1"||command=="D,T,0"||command=="D,T"){
     uint8_t state;uint16_t count,gen;
     portENTER_CRITICAL(&dataMux);
-    bool started=command!="D,T,1"||diagnosticTrace.Start();
+    bool started=command!="D,T,1"||(!autoTrace.armed&&diagnosticTrace.Start());
     if(command=="D,T,0")diagnosticTrace.Freeze();
     state=diagnosticTrace.state;count=diagnosticTrace.count;gen=diagnosticTrace.generation;
     portEXIT_CRITICAL(&dataMux);
@@ -1294,7 +1336,7 @@ void runDiagnosticCommand(const String &command) {
     if(!BiofitDiag::ParseFields(command.c_str()+4,args,3)||args[2]>2){replyConfig("ERR,D,FORMAT");return;}
     BiofitDiag::Sample sample;
     portENTER_CRITICAL(&dataMux);
-    bool ok=diagnosticTrace.Read(args[0],args[1],sample);
+    bool ok=!autoTrace.armed&&(args[0]>=0x8000u?autoTrace.Read(args[0],args[1],sample):diagnosticTrace.Read(args[0],args[1],sample));
     portEXIT_CRITICAL(&dataMux);
     uint8_t bytes[20];
     if(!ok||!BiofitDiag::Encode(sample,TRACKER_ID,args[0],args[1],(uint8_t)args[2],bytes)){replyConfig("ERR,D,TRACE");return;}
@@ -1573,6 +1615,13 @@ void setup() {
     for(uint16_t i=0;i<BiofitDiag::MaxTrace;++i)new(extended+i) BiofitDiag::Sample();
     diagnosticTrace.Attach(extended,BiofitDiag::MaxTrace);
   }
+  void* autoMemory=heap_caps_malloc(sizeof(BiofitDiag::Sample)*BiofitDiag::AutoStorage,MALLOC_CAP_SPIRAM|MALLOC_CAP_8BIT);
+  if(autoMemory){
+    auto* extended=static_cast<BiofitDiag::Sample*>(autoMemory);
+    for(uint32_t i=0;i<BiofitDiag::AutoStorage;++i)new(extended+i) BiofitDiag::Sample();
+    autoTrace.Attach(extended);
+  }
+  diagnosticBoot=esp_random();if(!diagnosticBoot)diagnosticBoot=1;
   startBLE();
   xTaskCreatePinnedToCore(imuTask,"BIOFIT_IMU",8192,nullptr,5,&imuTaskHandle,1);
   if (xTaskCreatePinnedToCore(transportTask,"BIOFIT_BLE_TX",6144,nullptr,2,nullptr,1)!=pdPASS) {
@@ -1610,6 +1659,13 @@ void loop() {
     else serialPos=0;
   }
   const uint32_t now=millis();
+  // Incremental snapshot copy, at most 48 short critical sections per pass.
+  for(uint8_t i=0;i<48;++i){
+    portENTER_CRITICAL(&dataMux);
+    bool work=autoTrace.Step();
+    portEXIT_CRITICAL(&dataMux);
+    if(!work)break;
+  }
   pumpTraceBlock(now);
   // No escritura Serial desde la IMU al usar PLOT; graficar desde loop.
   // Antes de AXIS OK, no rotulamos datos crudos como anatomicos:

@@ -3,6 +3,7 @@
 #include <cmath>
 #include <cstdio>
 #include <initializer_list>
+#include <vector>
 using namespace BiofitDiag;
 int main(){
   uint16_t a[3]={};
@@ -47,5 +48,31 @@ int main(){
   assert((CrcUpdate(0xffffffffu,known,9)^0xffffffffu)==0xcbf43926u);
   EncodeBlockEnd(2,0x1234,0x5678,16,0xcbf43926u,packet);
   assert(packet[0]==0xd4&&packet[1]==2&&packet[2]==16&&packet[4]==0x34&&packet[7]==0x56&&packet[8]==0x26&&packet[11]==0xcb);
+  uint16_t mid;uint32_t mt;
+  assert(ParseMarker("65535,4294967295",mid,mt)&&mid==65535&&mt==0xffffffffu);
+  assert(!ParseMarker("1,4294967296",mid,mt)&&!ParseMarker("0,0",mid,mt)&&!ParseMarker("1,0,",mid,mt));
+  std::vector<Sample> memory(AutoStorage);AutoBank bank;
+  assert(!bank.Begin(1));bank.Attach(memory.data());assert(bank.Begin(1)&&bank.Begin(1));
+  for(uint32_t ms=0;ms<=5000;ms+=5){s.ms=ms;bank.Push(s);}
+  assert(bank.Mark(1,4800,5000)==0&&bank.Mark(1,4800,5000)==0&&bank.Mark(1,4801,5000)==-1);
+  assert(bank.Mark(2,5000,5000)==1);assert(!bank.Step());
+  for(uint32_t ms=5005;ms<=6000;ms+=5){s.ms=ms;bank.Push(s);for(int k=0;k<48;++k)if(!bank.Step())break;}
+  bank.Stop();while(bank.Step()){}
+  assert(bank.used==2&&bank.slots[0].state==3&&bank.slots[1].state==3);
+  assert(bank.slots[0].flags==0&&bank.slots[0].count==801);
+  assert(bank.Read(bank.slots[0].gen,0,s)&&s.ms==1800);
+  assert(bank.Read(bank.slots[0].gen,800,s)&&s.ms==5800);
+  assert(bank.Read(bank.slots[1].gen,800,s)&&s.ms==6000);
+  assert(!bank.Begin(1)&&bank.Begin(2));
+  // Modulo millis rollover, partial pre/post and capacity bound.
+  for(uint32_t i=0;i<100;i++){s.ms=0xffffff00u+i*5u;bank.Push(s);}
+  assert(bank.Mark(1,s.ms,s.ms)==0);bank.Stop();while(bank.Step()){}
+  assert(bank.slots[0].state==3&&(bank.slots[0].flags&3)==3);
+  assert(bank.Read(bank.slots[0].gen,99,s)&&s.ms==0xffffff00u+99u*5u);
+  assert(bank.Begin(3));
+  for(uint16_t i=1;i<=AutoSlots;++i)assert(bank.Mark(i,100,100)==i-1);
+  assert(bank.Mark(AutoSlots+1,100,100)==-1);bank.Stop();while(bank.Step()){}
+  assert(bank.slots[0].state==4&&bank.slots[0].count==0);
+  EncodeSnapshot(1,0,bank.slots[0],packet);assert(packet[0]==0xd5&&packet[1]==1&&packet[3]==4&&packet[6]==1);
   std::puts("PASS: profile grammar, idempotency, transition timeout/rollover, supervised rearm, bounded correction, ring and packet encoding");
 }
