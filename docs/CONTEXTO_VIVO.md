@@ -13,3 +13,7 @@ Dos trackers Waveshare ESP32-S3-LCD-1.47B / QMI8658. BLE BILATERAL LEGACY, UP ti
 CI del código V2.2.9: 3/3 (run 44444687178). No prueba física independiente. Pendiente prioritario: pérdida progresiva de saltos y recuperación tras reposo; verificar contadores UP/AR y exportar CSV antes de modificar código. Hipótesis abiertas: rearme, gravedad, BLE/reloj/emparejamiento, condición de apoyo y otras causas. No atribuir causa a AutoRest solo por correlación.
 
 RCA: registrar decisiones, pruebas, errores, versiones, cambios y límites de validación en GitHub durante el trabajo. Conservar los recursos y configuraciones existentes. La siguiente intervención la define el usuario.
+
+
+## 27/11/2026 — BMD físico, GFA y locomoción universal
+Ver [registro RCA y hoja de ruta](RCA_20261127_BMD_GFA_LOCOMOCION.md): perfiles remotos y adquisición/exportación verificados por usuario, transferencia lenta, ensayos CSV pendientes, próxima revisión BMD/GFA y futuro motor común STEP/WALK/RUN/JUMP. Solo documentación, sin cambio de código ni promoción.
